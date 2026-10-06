@@ -13,7 +13,21 @@ import {
   totalRatioPct,
 } from '../types/blend';
 import { averageScore } from '../types/cupping';
-import { createId, listBlends, nowIso, putBlend, removeBlend } from '../utils/db';
+import { occupiedWeightOf, roundGram } from '../types/writeoff';
+import { blendBatchOf, finalizationBlockers } from '../utils/writeoff';
+import { finalBlendWarnings } from './writeoffSlice';
+import {
+  backfillBlendOccupations,
+  createId,
+  finalizeBlend as finalizeBlendDb,
+  listBlends,
+  listPotOccupations,
+  nowIso,
+  putBlend,
+  removeBlend,
+  removePotOccupationsByBlend,
+  syncOccupations,
+} from '../utils/db';
 import type { RootState } from './store';
 
 export type RatioFlag = 'valid' | 'invalid';
@@ -33,6 +47,8 @@ export interface BlendDraftState {
   targetFlavor: string[];
   createdAt: string;
   state: BlendState;
+  /** 计划产量（克）：按占比切分锅次成品 */
+  batchG: number;
 }
 
 interface BlendStateShape {
@@ -55,6 +71,7 @@ export const emptyBlendDraft = (): BlendDraftState => ({
   targetFlavor: [],
   createdAt: today(),
   state: 'trial',
+  batchG: 1000,
 });
 
 export const initialBlendFilters: BlendFilters = {
@@ -74,7 +91,20 @@ const initialState: BlendStateShape = {
   notice: '',
 };
 
+export interface BlendWriteResult {
+  blends: Blend[];
+  occupations: import('../types/writeoff').PotOccupation[];
+  /** 因占用失效转为「待替换」的方案 id */
+  pendingBlendIds: string[];
+}
+
 export const fetchBlends = createAsyncThunk('blends/fetchAll', async () => listBlends());
+
+async function reloadWithOccupations(): Promise<BlendWriteResult> {
+  const synced = await syncOccupations();
+  const [nextBlends, nextOccupations] = await Promise.all([listBlends(), listPotOccupations()]);
+  return { blends: nextBlends, occupations: nextOccupations, pendingBlendIds: synced.pendingBlendIds };
+}
 
 export const createBlend = createAsyncThunk('blends/create', async (draft: BlendDraftState) => {
   const stamp = nowIso();
@@ -85,43 +115,81 @@ export const createBlend = createAsyncThunk('blends/create', async (draft: Blend
     targetFlavor: joinFlavors(draft.targetFlavor),
     createdAt: draft.createdAt,
     state: draft.state,
+    batchG: draft.batchG,
     updatedAt: stamp,
   };
   await putBlend(row);
-  return listBlends();
+  return reloadWithOccupations();
 });
 
 export const updateBlend = createAsyncThunk(
   'blends/update',
   async (input: { id: string; draft: BlendDraftState }) => {
     const stamp = nowIso();
+    const existing = (await listBlends()).find((blend) => blend.id === input.id);
     const row: Blend = {
       id: input.id,
       name: input.draft.name.trim(),
       items: input.draft.items.map((item) => ({ ...item, ratioPct: Math.round(item.ratioPct * 100) / 100 })),
       targetFlavor: joinFlavors(input.draft.targetFlavor),
-      createdAt: input.draft.createdAt,
+      createdAt: existing?.createdAt ?? input.draft.createdAt,
       state: input.draft.state,
+      batchG: input.draft.batchG,
       updatedAt: stamp,
     };
     await putBlend(row);
-    return listBlends();
+    return reloadWithOccupations();
   },
 );
 
 export const deleteBlend = createAsyncThunk('blends/remove', async (id: string) => {
+  await removePotOccupationsByBlend(id);
   await removeBlend(id);
-  return listBlends();
+  const [blends, occupations] = await Promise.all([listBlends(), listPotOccupations()]);
+  return { blends, occupations, pendingBlendIds: [] as string[] };
 });
 
+/**
+ * 方案状态流转。
+ * - trial → final：走定版闸门（只用已核销且杯测通过的锅次），被拦截抛错；
+ * - 其它流转直接更新；任何流转后都重算占用账。
+ */
 export const advanceBlendState = createAsyncThunk(
   'blends/advanceState',
-  async (input: { id: string; state: BlendState }) => {
-    const existing = (await listBlends()).find((blend) => blend.id === input.id);
-    if (existing) {
-      await putBlend({ ...existing, state: input.state, updatedAt: nowIso() });
+  async (input: { id: string; state: BlendState }, { rejectWithValue }) => {
+    if (input.state === 'final') {
+      const result = await finalizeBlendDb(input.id);
+      if (!result.ok) return rejectWithValue(result.message);
+    } else {
+      const existing = (await listBlends()).find((blend) => blend.id === input.id);
+      if (existing) {
+        await putBlend({ ...existing, state: input.state, updatedAt: nowIso() });
+      }
     }
-    return listBlends();
+    await syncOccupations();
+    const [blends, occupations] = await Promise.all([listBlends(), listPotOccupations()]);
+    return { blends, occupations, pendingBlendIds: [] as string[] };
+  },
+);
+
+/** 杯测改动 / 占用失效后的「重新认领」：对试配 / 待替换方案重算占用 */
+export const reconfirmBlendOccupations = createAsyncThunk(
+  'blends/reconfirm',
+  async (input: { id: string }) => {
+    // 先尝试旧数据补认，再全量重算；所有成分都重新占用成功才从待替换回到试配
+    await backfillBlendOccupations(input.id);
+    const synced = await syncOccupations();
+    const existing = (await listBlends()).find((blend) => blend.id === input.id);
+    if (existing && existing.state === 'pending' && !synced.pendingBlendIds.includes(existing.id)) {
+      const occupations = await listPotOccupations();
+      const mine = occupations.filter((occupation) => occupation.blendId === existing.id);
+      const fullyHeld = mine.length > 0 && mine.every((occupation) => occupation.state === 'held');
+      if (fullyHeld) {
+        await putBlend({ ...existing, state: 'trial', updatedAt: nowIso() });
+      }
+    }
+    const [blends, occupations] = await Promise.all([listBlends(), listPotOccupations()]);
+    return { blends, occupations, pendingBlendIds: synced.pendingBlendIds };
   },
 );
 
@@ -130,7 +198,7 @@ export const importBlendDraft = createAsyncThunk('blends/import', async (draft: 
   const stamp = nowIso();
   const row: Blend = { ...draft, id: createId('bl'), updatedAt: stamp };
   await putBlend(row);
-  return listBlends();
+  return reloadWithOccupations();
 });
 
 const blendSlice = createSlice({
@@ -145,7 +213,7 @@ const blendSlice = createSlice({
     },
     setBlendDraftField(
       state,
-      action: PayloadAction<{ field: 'name' | 'createdAt' | 'state' | 'targetFlavor'; value: string | string[] | BlendState }>,
+      action: PayloadAction<{ field: 'name' | 'createdAt' | 'state' | 'targetFlavor' | 'batchG'; value: string | string[] | BlendState | number }>,
     ) {
       const { field, value } = action.payload;
       switch (field) {
@@ -157,6 +225,9 @@ const blendSlice = createSlice({
           break;
         case 'state':
           state.draft.state = value as BlendState;
+          break;
+        case 'batchG':
+          state.draft.batchG = Number(value) || 0;
           break;
         case 'targetFlavor':
           state.draft.targetFlavor = Array.isArray(value) ? value : splitFlavors(String(value));
@@ -204,6 +275,7 @@ const blendSlice = createSlice({
         targetFlavor: splitFlavors(blend.targetFlavor),
         createdAt: blend.createdAt,
         state: blend.state,
+        batchG: typeof blend.batchG === 'number' && blend.batchG > 0 ? blend.batchG : 1000,
       };
       state.editingId = blend.id;
     },
@@ -227,9 +299,12 @@ const blendSlice = createSlice({
       })
       .addCase(createBlend.fulfilled, (state, action) => {
         state.loading = false;
-        state.blends = action.payload;
+        state.blends = action.payload.blends;
         state.draft = emptyBlendDraft();
-        state.notice = '拼配方案已保存';
+        state.notice =
+          action.payload.pendingBlendIds.length > 0
+            ? '拼配方案已保存，但部分锅次占用失效，方案停在「待替换」'
+            : '拼配方案已保存，锅次占用已记账';
       })
       .addCase(createBlend.rejected, (state, action) => {
         state.loading = false;
@@ -237,30 +312,38 @@ const blendSlice = createSlice({
       })
       .addCase(updateBlend.fulfilled, (state, action) => {
         state.loading = false;
-        state.blends = action.payload;
+        state.blends = action.payload.blends;
         state.editingId = null;
-        state.notice = '拼配方案已更新';
+        state.notice = '拼配方案已更新，占用账已重算';
       })
       .addCase(updateBlend.rejected, (state, action) => {
         state.loading = false;
         state.error = action.error.message ?? '拼配方案更新失败';
       })
       .addCase(deleteBlend.fulfilled, (state, action) => {
-        state.blends = action.payload;
+        state.blends = action.payload.blends;
       })
       .addCase(deleteBlend.rejected, (state, action) => {
         state.error = action.error.message ?? '拼配方案删除失败';
       })
       .addCase(advanceBlendState.fulfilled, (state, action) => {
-        state.blends = action.payload;
+        state.blends = action.payload.blends;
         state.notice = '方案状态已流转';
       })
       .addCase(advanceBlendState.rejected, (state, action) => {
-        state.error = action.error.message ?? '方案状态流转失败';
+        state.error = (action.payload as string) ?? action.error.message ?? '方案状态流转失败';
+      })
+      .addCase(reconfirmBlendOccupations.fulfilled, (state, action) => {
+        state.blends = action.payload.blends;
+        const blend = action.payload.blends.find((item) => item.id === action.meta.arg.id);
+        state.notice =
+          blend && blend.state === 'trial'
+            ? '占用已重新认领，方案回到试配'
+            : '仍有锅次未核销或杯测未通过，请先处理';
       })
       .addCase(importBlendDraft.fulfilled, (state, action) => {
-        state.blends = action.payload;
-        state.notice = '方案 JSON 已导入';
+        state.blends = action.payload.blends;
+        state.notice = '方案 JSON 已导入，占用账已重算';
       })
       .addCase(importBlendDraft.rejected, (state, action) => {
         state.error = action.error.message ?? '方案 JSON 导入失败';
@@ -307,21 +390,50 @@ export interface BlendRow extends Blend {
   ratioValid: boolean;
   averageScore: number;
   cuppingCount: number;
+  /** 该方案的占用行 */
+  occupations: import('../types/writeoff').PotOccupation[];
+  /** 定版阻塞原因（空数组 = 可定版） */
+  blockers: string[];
+  /** 定版后的「只提醒」事项（杯测改动 / 占用失效但已锁定定版） */
+  warnings: string[];
+  /** 已占用成品合计（克） */
+  heldG: number;
+  /** 计划占用成品合计（克） */
+  needG: number;
+  /** 是否所有成分都在账（held） */
+  fullyHeld: boolean;
 }
 
-/** 拼配列表行：附占比合计、校验结果与参批次杯测均分 */
+/** 拼配列表行：附占比合计、校验结果、参批次杯测均分与锅次占用情况 */
 export const selectBlendRows = createSelector(
-  [selectBlendState, (state: RootState) => state.cuppings.cuppings],
-  (blendState, cuppings): BlendRow[] =>
+  [
+    selectBlendState,
+    (state: RootState) => state.cuppings.cuppings,
+    (state: RootState) => state.writeoff.occupations,
+  ],
+  (blendState, cuppings, occupations): BlendRow[] =>
     blendState.blends.map((blend) => {
       const profileIds = new Set(blend.items.map((item) => item.profileId).filter(Boolean));
       const related = cuppings.filter((cupping) => profileIds.has(cupping.profileId));
+      const mine = occupations.filter((occupation) => occupation.blendId === blend.id);
+      const blockers = finalizationBlockers(blend, occupations, cuppings);
+      const warnings = blend.state === 'final' ? finalBlendWarnings(blend.id, occupations) : [];
+      const heldG = roundGram(mine.filter((row) => row.state === 'held').reduce((acc, row) => acc + row.occupiedG, 0));
+      const needG = roundGram(
+        blend.items.reduce((acc, item) => acc + occupiedWeightOf(item.ratioPct, blendBatchOf(blend)), 0),
+      );
       return {
         ...blend,
         ratioTotal: totalRatioPct(blend.items),
         ratioValid: isRatioValid(blend.items),
         averageScore: averageScore(related),
         cuppingCount: related.length,
+        occupations: mine,
+        blockers,
+        warnings,
+        heldG,
+        needG,
+        fullyHeld: mine.length > 0 && mine.every((row) => row.state === 'held'),
       };
     }),
 );

@@ -8,6 +8,7 @@ import { App as AntdApp, Badge, Layout, Menu, Space, Spin, Tag, Typography } fro
 import {
   ApiOutlined,
   AreaChartOutlined,
+  AuditOutlined,
   CoffeeOutlined,
   ExperimentOutlined,
   InboxOutlined,
@@ -20,6 +21,7 @@ import { selectBeanStats } from './stores/beanSlice';
 import { selectRoastStats } from './stores/roastSlice';
 import { selectCuppingStats } from './stores/cuppingSlice';
 import { selectBlendStats } from './stores/blendSlice';
+import { selectWriteoffStats } from './stores/writeoffSlice';
 
 const { Header, Sider, Content, Footer } = Layout;
 
@@ -29,6 +31,7 @@ const ROUTE_ICONS: Record<string, ReactNode> = {
   [ROUTES.curves]: <AreaChartOutlined />,
   [ROUTES.development]: <ApiOutlined />,
   [ROUTES.cuppings]: <ExperimentOutlined />,
+  [ROUTES.writeoff]: <AuditOutlined />,
   [ROUTES.blends]: <CoffeeOutlined />,
 };
 
@@ -43,6 +46,7 @@ export default function App() {
   const roastStats = useAppSelector(selectRoastStats);
   const cuppingStats = useAppSelector(selectCuppingStats);
   const blendStats = useAppSelector(selectBlendStats);
+  const writeoffStats = useAppSelector(selectWriteoffStats);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,6 +114,10 @@ export default function App() {
             <span>
               <CoffeeOutlined /> 拼配 {blendStats.total} 个 · 定版 {blendStats.finalized}
             </span>
+            <span>
+              <AuditOutlined /> 核销 {writeoffStats.verified}/{writeoffStats.settlementsTotal} 锅 · 待核销{' '}
+              {writeoffStats.pending} · 占用失效 {writeoffStats.invalid}
+            </span>
           </Space>
         </div>
       </Sider>
@@ -158,7 +166,7 @@ export default function App() {
         </Content>
 
         <Footer style={{ textAlign: 'center', background: 'transparent', color: 'rgba(74,44,23,0.55)' }}>
-          纯前端 SPA · 数据仅保存在本机浏览器 IndexedDB（库名 gbroastlog，结构版本 2）·
+          纯前端 SPA · 数据仅保存在本机浏览器 IndexedDB（库名 gbroastlog，结构版本 3）·
           <Link to={ROUTES.beans} style={{ marginLeft: 6 }}>
             返回生豆档案
           </Link>

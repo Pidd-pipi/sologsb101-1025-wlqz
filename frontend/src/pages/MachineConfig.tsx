@@ -39,7 +39,6 @@ import { useIdbTable } from '../hooks/useIdbTable';
 import { useAppDispatch, useAppSelector } from '../stores/store';
 import { consumeStock, selectBeanState } from '../stores/beanSlice';
 import {
-  advanceRoastState,
   deleteRoastProfile,
   fetchMachineTemplates,
   fetchRoastProfiles,
@@ -54,6 +53,7 @@ import {
 } from '../stores/roastSlice';
 import { fetchCuppings } from '../stores/cuppingSlice';
 import { fetchBlends } from '../stores/blendSlice';
+import { changeRoastStateThunk, fetchWriteoffData, setQueueStatusThunk } from '../stores/writeoffSlice';
 import {
   AIRFLOW_COLOR,
   AIRFLOW_LABEL,
@@ -146,6 +146,7 @@ export default function MachineConfig() {
       airflow: 'half',
       gasLevel: 4,
       chargeG: 500,
+      dailyCapacityG: 12000,
       note: '',
     });
     setModalOpen(true);
@@ -158,6 +159,7 @@ export default function MachineConfig() {
       airflow: template.airflow,
       gasLevel: template.gasLevel,
       chargeG: template.chargeG,
+      dailyCapacityG: template.dailyCapacityG ?? 12000,
       note: template.note,
     });
     setModalOpen(true);
@@ -208,7 +210,12 @@ export default function MachineConfig() {
         cancelText: '取消',
         async onOk() {
           const result = await dispatch(consumeStock(profile.id)).unwrap();
-          await Promise.all([dispatch(fetchRoastProfiles()).unwrap(), dispatch(fetchMachineTemplates()).unwrap()]);
+          await Promise.all([
+            dispatch(fetchRoastProfiles()).unwrap(),
+            dispatch(fetchMachineTemplates()).unwrap(),
+            dispatch(fetchWriteoffData()).unwrap(),
+            dispatch(fetchBlends()).unwrap(),
+          ]);
           if (result.ok) {
             message.success(result.message);
           } else {
@@ -219,8 +226,15 @@ export default function MachineConfig() {
       return;
     }
     try {
-      await dispatch(advanceRoastState({ id: profile.id, state: next })).unwrap();
-      message.success(`记录状态已更新为「${ROAST_STATE_LABEL[next]}」`);
+      // 作废 / 恢复都联动核销台账与方案占用（作废即报废锅次、释放占用）
+      const result = await dispatch(changeRoastStateThunk({ profileId: profile.id, state: next })).unwrap();
+      await Promise.all([
+        dispatch(fetchRoastProfiles()).unwrap(),
+        dispatch(fetchWriteoffData()).unwrap(),
+        dispatch(fetchBlends()).unwrap(),
+      ]);
+      if (result.ok) message.success(result.message);
+      else message.warning(result.message);
     } catch (error) {
       message.error(`状态流转失败：${error instanceof Error ? error.message : '未知错误'}`);
     }
@@ -278,7 +292,7 @@ export default function MachineConfig() {
       title: '常用载量',
       dataIndex: 'chargeG',
       key: 'chargeG',
-      width: 170,
+      width: 120,
       sorter: (a, b) => a.chargeG - b.chargeG,
       render: (value: number) => (
         <Space size={6}>
@@ -286,6 +300,14 @@ export default function MachineConfig() {
           <Tag>{CHARGE_LEVEL_LABEL[chargeLevelOf(value)]}</Tag>
         </Space>
       ),
+    },
+    {
+      title: '当天容量',
+      dataIndex: 'dailyCapacityG',
+      key: 'dailyCapacityG',
+      width: 130,
+      sorter: (a, b) => (a.dailyCapacityG ?? 0) - (b.dailyCapacityG ?? 0),
+      render: (value: number) => <span className="gb-mono">{value ?? 12000} g/天</span>,
     },
     {
       title: '备注',
@@ -372,10 +394,52 @@ export default function MachineConfig() {
     },
     {
       title: '状态',
-      dataIndex: 'state',
       key: 'state',
-      width: 100,
-      render: (value: RoastState) => <Tag color={ROAST_STATE_COLOR[value]}>{ROAST_STATE_LABEL[value]}</Tag>,
+      width: 150,
+      render: (_value, record) => (
+        <Space direction="vertical" size={2}>
+          <Tag color={ROAST_STATE_COLOR[record.state]}>{ROAST_STATE_LABEL[record.state]}</Tag>
+          {record.state !== 'void' ? (
+            (record.queueStatus ?? 'scheduled') === 'queued' ? (
+              <Button
+                size="small"
+                type="link"
+                style={{ padding: 0, height: 18 }}
+                onClick={() => {
+                  void (async () => {
+                    const result = await dispatch(
+                      setQueueStatusThunk({ profileId: record.id, queueStatus: 'scheduled' }),
+                    ).unwrap();
+                    await dispatch(fetchRoastProfiles());
+                    if (result.ok) message.success(result.message);
+                    else message.warning(result.message);
+                  })();
+                }}
+              >
+                排队中 · 提前排产
+              </Button>
+            ) : (
+              <Button
+                size="small"
+                type="link"
+                style={{ padding: 0, height: 18 }}
+                onClick={() => {
+                  void (async () => {
+                    const result = await dispatch(
+                      setQueueStatusThunk({ profileId: record.id, queueStatus: 'queued' }),
+                    ).unwrap();
+                    await dispatch(fetchRoastProfiles());
+                    if (result.ok) message.success(result.message);
+                    else message.warning(result.message);
+                  })();
+                }}
+              >
+                已排产 · 让位排队
+              </Button>
+            )
+          ) : null}
+        </Space>
+      ),
     },
     {
       title: '状态流转 / 操作',
@@ -587,6 +651,22 @@ export default function MachineConfig() {
             ]}
           >
             <InputNumber min={50} max={3000} step={50} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="dailyCapacityG"
+            label="机台当天容量（克）"
+            tooltip="同机台同日期已排产锅次载量合计超过该值时，新锅次自动下批排队"
+            rules={[
+              { required: true, message: '请填写机台当天容量' },
+              {
+                validator: (_rule, value: number) =>
+                  Number.isFinite(value) && value >= 500
+                    ? Promise.resolve()
+                    : Promise.reject(new Error('当天容量至少 500 克')),
+              },
+            ]}
+          >
+            <InputNumber min={500} step={500} style={{ width: '100%' }} addonAfter="g/天" />
           </Form.Item>
           <Form.Item name="note" label="备注" rules={[{ max: 40, message: '不超过 40 个字符' }]}>
             <Input placeholder="如：满锅载量 / 样品烘焙" />

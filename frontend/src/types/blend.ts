@@ -11,7 +11,7 @@ export interface BlendItem {
   ratioPct: number;
 }
 
-export type BlendState = 'trial' | 'final' | 'retired';
+export type BlendState = 'trial' | 'pending' | 'final' | 'retired';
 
 export interface Blend {
   id: string;
@@ -23,8 +23,10 @@ export interface Blend {
   targetFlavor: string;
   /** 创建日期（YYYY-MM-DD） */
   createdAt: string;
-  /** 状态：试配 / 定版 / 停用 */
+  /** 状态：试配 / 待替换 / 定版 / 停用 */
   state: BlendState;
+  /** 计划产量（克）：占用锅次成品时按 ratioPct × batchG 切分；为空时取默认一锅 */
+  batchG?: number;
   updatedAt: string;
 }
 
@@ -32,26 +34,35 @@ export type BlendDraft = Omit<Blend, 'id' | 'updatedAt'>;
 
 export const BLEND_STATE_LABEL: Record<BlendState, string> = {
   trial: '试配',
+  pending: '待替换',
   final: '定版',
   retired: '停用',
 };
 
 export const BLEND_STATE_COLOR: Record<BlendState, string> = {
   trial: '#c9963c',
+  pending: '#d48806',
   final: '#2f6f4f',
   retired: '#8c8c8c',
 };
 
-export const BLEND_STATE_ORDER: BlendState[] = ['trial', 'final', 'retired'];
+export const BLEND_STATE_ORDER: BlendState[] = ['trial', 'pending', 'final', 'retired'];
 
 export const BLEND_STATE_OPTIONS = BLEND_STATE_ORDER.map((value) => ({
   value,
   label: BLEND_STATE_LABEL[value],
 }));
 
-/** 状态流转：试配 → 定版 → 停用；停用可回到试配 */
+/**
+ * 状态流转：
+ * - 试配 → 定版（占用全部核销且杯测通过）/ 停用；
+ * - 杯测改动导致占用失效：试配 → 待替换，需重新核销认领；
+ * - 待替换 → 试配（重新占用成功）/ 停用；
+ * - 定版为稳态：占用失效只发提醒不自动改状态，可停用或退回试配重调。
+ */
 export const BLEND_STATE_FLOW: Record<BlendState, BlendState[]> = {
   trial: ['final', 'retired'],
+  pending: ['trial', 'retired'],
   final: ['retired', 'trial'],
   retired: ['trial'],
 };

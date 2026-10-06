@@ -43,6 +43,7 @@ import { useAppDispatch, useAppSelector } from '../stores/store';
 import { fetchGreenBeans, selectBeanState } from '../stores/beanSlice';
 import { fetchRoastProfiles, selectRoastState } from '../stores/roastSlice';
 import { fetchCuppings, selectCuppingState } from '../stores/cuppingSlice';
+import { fetchWriteoffData } from '../stores/writeoffSlice';
 import {
   addDraftItem,
   advanceBlendState,
@@ -53,6 +54,7 @@ import {
   importBlendDraft,
   loadBlendDraft,
   removeDraftItem,
+  reconfirmBlendOccupations,
   resetBlendDraft,
   resetBlendFilters,
   selectBlendFilterOptions,
@@ -99,6 +101,7 @@ interface BlendFormValues {
   targetFlavor: string[];
   createdAt: Dayjs;
   state: BlendState;
+  batchG: number;
   items: BlendItem[];
 }
 
@@ -131,6 +134,7 @@ export default function BlendPlan() {
     void dispatch(fetchGreenBeans());
     void dispatch(fetchRoastProfiles());
     void dispatch(fetchCuppings());
+    void dispatch(fetchWriteoffData());
   }, [dispatch]);
 
   const beanMap = useMemo(() => new Map(beanState.greenBeans.map((bean) => [bean.id, bean])), [beanState.greenBeans]);
@@ -191,6 +195,7 @@ export default function BlendPlan() {
       targetFlavor: [],
       createdAt: dayjs(),
       state: 'trial',
+      batchG: 1000,
       items: [
         {
           greenBeanId: firstBean?.id ?? '',
@@ -215,6 +220,7 @@ export default function BlendPlan() {
       targetFlavor: splitFlavors(blend.targetFlavor),
       createdAt: dayjs(blend.createdAt),
       state: blend.state,
+      batchG: typeof blend.batchG === 'number' && blend.batchG > 0 ? blend.batchG : 1000,
       items: blend.items.length > 0 ? blend.items.map((item) => ({ ...item })) : [{ greenBeanId: '', profileId: '', ratioPct: 0 }],
     });
     setDrawerOpen(true);
@@ -269,6 +275,7 @@ export default function BlendPlan() {
       targetFlavor: values.targetFlavor ?? [],
       createdAt: values.createdAt.format('YYYY-MM-DD'),
       state: values.state,
+      batchG: Number(values.batchG) > 0 ? Number(values.batchG) : 1000,
     };
     try {
       if (editingId) {
@@ -299,8 +306,27 @@ export default function BlendPlan() {
   };
 
   const handleAdvanceState = async (row: BlendRow, next: BlendState): Promise<void> => {
-    await dispatch(advanceBlendState({ id: row.id, state: next })).unwrap();
-    message.success(`方案「${row.name}」已流转为「${BLEND_STATE_LABEL[next]}」`);
+    try {
+      await dispatch(advanceBlendState({ id: row.id, state: next })).unwrap();
+      await dispatch(fetchWriteoffData());
+      message.success(`方案「${row.name}」已流转为「${BLEND_STATE_LABEL[next]}」`);
+    } catch (error) {
+      // 定版闸门拦截：展示具体阻塞原因
+      const text =
+        typeof error === 'string'
+          ? error
+          : error && typeof error === 'object' && 'message' in error
+            ? String((error as { message: unknown }).message)
+            : describeError(error);
+      message.warning(text);
+    }
+  };
+
+  /** 杯测改动 / 占用失效后的重新认领 */
+  const handleReconfirm = async (row: BlendRow): Promise<void> => {
+    await dispatch(reconfirmBlendOccupations({ id: row.id })).unwrap();
+    await dispatch(fetchWriteoffData());
+    message.success('已按当前核销与杯测重新认领占用');
   };
 
   /* ------------------------------ 导出 / 导入 ------------------------------ */
@@ -350,6 +376,7 @@ export default function BlendPlan() {
               dispatch(fetchGreenBeans()).unwrap(),
               dispatch(fetchRoastProfiles()).unwrap(),
               dispatch(fetchCuppings()).unwrap(),
+              dispatch(fetchWriteoffData()).unwrap(),
             ]);
             message.success('整库档案已导入');
           },
@@ -369,6 +396,7 @@ export default function BlendPlan() {
         cancelText: '取消',
         async onOk() {
           await dispatch(importBlendDraft(draft)).unwrap();
+          await dispatch(fetchWriteoffData());
           message.success('拼配方案已导入');
         },
       });
@@ -460,13 +488,49 @@ export default function BlendPlan() {
       title: '状态',
       dataIndex: 'state',
       key: 'state',
-      width: 100,
+      width: 120,
       render: (value: BlendState) => <Tag color={BLEND_STATE_COLOR[value]}>{BLEND_STATE_LABEL[value]}</Tag>,
+    },
+    {
+      title: '锅次占用 / 定版闸门',
+      key: 'occupation',
+      width: 230,
+      render: (_value, row) => {
+        const heldCount = row.occupations.filter((item) => item.state === 'held').length;
+        const tag =
+          row.state === 'final' ? (
+            row.warnings.length === 0 ? (
+              <Tag color="#2f6f4f">定版占用在账</Tag>
+            ) : (
+              <Tooltip title={row.warnings.join('；')}>
+                <Tag color="#d48806">定版 · 有变动提醒（{row.warnings.length}）</Tag>
+              </Tooltip>
+            )
+          ) : row.fullyHeld ? (
+            <Tag color="#2f6f4f">
+              全部可定版（{heldCount}/{row.items.length}）
+            </Tag>
+          ) : (
+            <Tooltip title={row.blockers.slice(0, 4).join('；') || '占用尚未齐备'}>
+              <Tag color="#b3372f">
+                占用未齐（{heldCount}/{row.items.length}）
+              </Tag>
+            </Tooltip>
+          );
+        return (
+          <Space direction="vertical" size={2}>
+            {tag}
+            <span className="gb-muted gb-mono" style={{ fontSize: 12 }}>
+              计划 {row.needG}g · 已占 {row.heldG}g
+            </span>
+          </Space>
+        );
+      },
     },
     {
       title: '状态流转 / 操作',
       key: 'action',
-      width: 300,
+      width: 320,
       fixed: 'right',
       render: (_value, row) => (
         <Space size={4} wrap>
@@ -475,12 +539,18 @@ export default function BlendPlan() {
               key={next}
               size="small"
               type={next === 'final' ? 'primary' : 'default'}
+              disabled={next === 'final' && row.blockers.length > 0}
               icon={<SwapOutlined />}
               onClick={() => void handleAdvanceState(row, next)}
             >
               {BLEND_STATE_LABEL[next]}
             </Button>
           ))}
+          {(row.state === 'trial' || row.state === 'pending') && !row.fullyHeld ? (
+            <Button size="small" type="link" onClick={() => void handleReconfirm(row)}>
+              重新认领
+            </Button>
+          ) : null}
           <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(row)}>
             编辑
           </Button>
@@ -571,7 +641,7 @@ export default function BlendPlan() {
             loading={blendState.loading}
             columns={columns}
             dataSource={rows}
-            scroll={{ x: 1460 }}
+            scroll={{ x: 1680 }}
             pagination={{ pageSize: 6, showTotal: (total) => `共 ${total} 个方案` }}
           />
         )}
@@ -614,10 +684,25 @@ export default function BlendPlan() {
           </Form.Item>
           <Space size={16} wrap>
             <Form.Item name="createdAt" label="创建日期" rules={[{ required: true, message: '请选择创建日期' }]}>
-              <DatePicker style={{ width: 200 }} />
+              <DatePicker style={{ width: 160 }} />
             </Form.Item>
             <Form.Item name="state" label="状态" rules={[{ required: true, message: '请选择状态' }]}>
-              <Select style={{ width: 160 }} options={BLEND_STATE_OPTIONS} />
+              <Select style={{ width: 130 }} options={BLEND_STATE_OPTIONS} />
+            </Form.Item>
+            <Form.Item
+              name="batchG"
+              label="计划产量（克）"
+              rules={[
+                { required: true, message: '请填写计划产量' },
+                {
+                  validator: (_rule, value: number) =>
+                    Number.isFinite(value) && value > 0
+                      ? Promise.resolve()
+                      : Promise.reject(new Error('计划产量需大于 0')),
+                },
+              ]}
+            >
+              <InputNumber min={1} step={100} style={{ width: 150 }} addonAfter="g" />
             </Form.Item>
           </Space>
 

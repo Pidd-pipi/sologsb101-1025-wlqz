@@ -14,6 +14,7 @@ export const ROUTES = {
   curves: '/curves',
   development: '/development',
   cuppings: '/cuppings',
+  writeoff: '/writeoff',
   blends: '/blends',
 } as const;
 
@@ -30,5 +31,6 @@ export const ROUTE_META: RouteMeta[] = [
   { path: ROUTES.curves, title: '烘焙曲线', description: '关键节点录入、时间轴排序与缺节点补录' },
   { path: ROUTES.development, title: '发展率与 RoR', description: '发展时间占比、分段升温速率与异常提示' },
   { path: ROUTES.cuppings, title: '杯测评分', description: '分项加权总分、分档结论与总分排序' },
+  { path: ROUTES.writeoff, title: '锅次核销', description: '成品/留样/损耗记账、方案占用与机台排队' },
   { path: ROUTES.blends, title: '拼配方案', description: '占比 100% 校验、杯测均分回显与 JSON 导入导出' },
 ];

@@ -4,7 +4,7 @@
  */
 import { createAsyncThunk, createSelector, createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import type { Airflow, MachineTemplate, MachineTemplateDraft, RoastProfile, RoastProfileDraft, RoastState } from '../types/roastprofile';
-import { AIRFLOW_ORDER, ROAST_STATE_LABEL, chargeLevelOf } from '../types/roastprofile';
+import { AIRFLOW_ORDER, DEFAULT_MACHINE_DAILY_CAPACITY_G, ROAST_STATE_LABEL, chargeLevelOf } from '../types/roastprofile';
 import type { RoastEvent, RoastEventDraft, RoastEventType } from '../types/event';
 import {
   createId,
@@ -93,12 +93,35 @@ const initialState: RoastStateShape = {
 
 export const fetchRoastProfiles = createAsyncThunk('roasts/fetchProfiles', async () => listRoastProfiles());
 
-export const createRoastProfile = createAsyncThunk('roasts/createProfile', async (draft: RoastProfileDraft) => {
-  const stamp = nowIso();
-  const row: RoastProfile = { ...draft, id: createId('rp'), createdAt: stamp, updatedAt: stamp };
-  await putRoastProfile(row);
-  return listRoastProfiles();
-});
+export const createRoastProfile = createAsyncThunk(
+  'roasts/createProfile',
+  async (draft: RoastProfileDraft) => {
+    const stamp = nowIso();
+    // 机台当天容量判定：已排产载量 + 本锅超过日容量 → 下批排队（记录照常建立）
+    const [profiles, templates] = await Promise.all([listRoastProfiles(), listMachineTemplates()]);
+    const capacity = templates.find((machine) => machine.model === draft.machineModel)?.dailyCapacityG ?? DEFAULT_MACHINE_DAILY_CAPACITY_G;
+    const used = profiles
+      .filter(
+        (profile) =>
+          profile.machineModel === draft.machineModel &&
+          profile.roastedAt === draft.roastedAt &&
+          profile.state !== 'void' &&
+          (profile.queueStatus ?? 'scheduled') === 'scheduled',
+      )
+      .reduce((acc, profile) => acc + profile.chargeG, 0);
+    const queued = used + draft.chargeG > capacity + 0.5;
+    const row: RoastProfile = {
+      ...draft,
+      id: createId('rp'),
+      queueStatus: queued ? 'queued' : 'scheduled',
+      queuedAt: queued ? stamp : null,
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
+    await putRoastProfile(row);
+    return listRoastProfiles();
+  },
+);
 
 export const updateRoastProfile = createAsyncThunk(
   'roasts/updateProfile',

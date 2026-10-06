@@ -18,6 +18,7 @@ const MachineConfig = lazy(() => import('../pages/MachineConfig'));
 const CurveEntry = lazy(() => import('../pages/CurveEntry'));
 const DevelopmentBoard = lazy(() => import('../pages/DevelopmentBoard'));
 const CuppingBoard = lazy(() => import('../pages/CuppingBoard'));
+const WriteoffBoard = lazy(() => import('../pages/WriteoffBoard'));
 const BlendPlan = lazy(() => import('../pages/BlendPlan'));
 
 /** 懒加载页面占位 */
@@ -41,6 +42,7 @@ export const appRoutes: RouteObject[] = [
       { path: 'curves', element: withSuspense(<CurveEntry />) },
       { path: 'development', element: withSuspense(<DevelopmentBoard />) },
       { path: 'cuppings', element: withSuspense(<CuppingBoard />) },
+      { path: 'writeoff', element: withSuspense(<WriteoffBoard />) },
       { path: 'blends', element: withSuspense(<BlendPlan />) },
       { path: '*', element: <Navigate to={ROUTES.beans} replace /> },
     ],

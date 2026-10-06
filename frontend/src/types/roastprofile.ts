@@ -5,6 +5,8 @@
  */
 export type Airflow = 'closed' | 'half' | 'open';
 export type RoastState = 'recording' | 'done' | 'void';
+/** 排队状态：已排产 / 排队中（机台当天容量不足时新锅次进入排队） */
+export type QueueStatus = 'scheduled' | 'queued';
 
 export interface RoastProfile {
   id: string;
@@ -24,6 +26,10 @@ export interface RoastProfile {
   roastedAt: string;
   /** 状态：记录中 / 已完成 / 作废 */
   state: RoastState;
+  /** 机台当天容量排产：已排产 / 排队中（v3 新增，旧数据兜底 scheduled） */
+  queueStatus?: QueueStatus;
+  /** 入队时间（ISO）：排队中的锅次按此时间先后让出容量 */
+  queuedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -41,6 +47,8 @@ export interface MachineTemplate {
   gasLevel: number;
   /** 常用载量（克） */
   chargeG: number;
+  /** 机台当天容量上限（克）：同机台同日期已排产锅次载量合计超过它时，新锅次下批排队 */
+  dailyCapacityG: number;
   /** 备注：如「满锅」「样品烘焙」 */
   note: string;
   createdAt: string;
@@ -48,6 +56,20 @@ export interface MachineTemplate {
 }
 
 export type MachineTemplateDraft = Omit<MachineTemplate, 'id' | 'createdAt' | 'updatedAt'>;
+
+/** 机台未配置当天容量时的兜底值（克，约 12kg） */
+export const DEFAULT_MACHINE_DAILY_CAPACITY_G = 12000;
+
+/** 排队状态标签 / 配色（与锅次核销页的容量排产共用） */
+export const QUEUE_STATUS_LABEL: Record<QueueStatus, string> = {
+  scheduled: '已排产',
+  queued: '排队中',
+};
+
+export const QUEUE_STATUS_COLOR: Record<QueueStatus, string> = {
+  scheduled: '#2f6f4f',
+  queued: '#c9963c',
+};
 
 export const AIRFLOW_LABEL: Record<Airflow, string> = {
   closed: '关',
@@ -111,6 +133,29 @@ export function chargeLevelOf(chargeG: number): 'sample' | 'standard' | 'full' {
   if (chargeG < 250) return 'sample';
   if (chargeG < 700) return 'standard';
   return 'full';
+}
+
+/** 取机台当天容量（克）：同机型模板取第一个配置，没配模板用兜底值 */
+export function dailyCapacityOf(templates: Pick<MachineTemplate, 'model' | 'dailyCapacityG'>[], model: string): number {
+  const template = templates.find((item) => item.model === model);
+  return template && template.dailyCapacityG > 0 ? template.dailyCapacityG : DEFAULT_MACHINE_DAILY_CAPACITY_G;
+}
+
+/** 同机台同日期已排产锅次的载量合计（作废与排队中的不占容量） */
+export function scheduledChargeOf(
+  profiles: Array<Pick<RoastProfile, 'machineModel' | 'roastedAt' | 'chargeG' | 'state' | 'queueStatus'>>,
+  machineModel: string,
+  date: string,
+): number {
+  return profiles
+    .filter(
+      (profile) =>
+        profile.machineModel === machineModel &&
+        profile.roastedAt === date &&
+        profile.state !== 'void' &&
+        (profile.queueStatus ?? 'scheduled') === 'scheduled',
+    )
+    .reduce((acc, profile) => acc + profile.chargeG, 0);
 }
 
 export const CHARGE_LEVEL_LABEL: Record<'sample' | 'standard' | 'full', string> = {

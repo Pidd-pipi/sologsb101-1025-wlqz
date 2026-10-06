@@ -16,7 +16,9 @@ import type { RoastState } from '../types/roastprofile';
 import { ROAST_STATE_ORDER } from '../types/roastprofile';
 import type { GreenBean } from '../types/greenbean';
 import type { BeanProcess } from '../types/greenbean';
-import { createId, listCuppings, nowIso, putCupping, removeCupping } from '../utils/db';
+import { createId, listCuppings, nowIso, putCupping, refreshOccupationsAfterCupping, removeCupping } from '../utils/db';
+import { fetchBlends } from './blendSlice';
+import { fetchWriteoffData } from './writeoffSlice';
 import type { RootState } from './store';
 
 /** 分项草稿（跨页共享：杯测页表单 + 拼配页均分回显） */
@@ -83,7 +85,7 @@ const initialState: CuppingStateShape = {
 
 export const fetchCuppings = createAsyncThunk('cuppings/fetchAll', async () => listCuppings());
 
-export const createCupping = createAsyncThunk('cuppings/create', async (draft: CuppingDraftState) => {
+export const createCupping = createAsyncThunk('cuppings/create', async (draft: CuppingDraftState, { dispatch }) => {
   const stamp = nowIso();
   const row: Cupping = {
     id: createId('cp'),
@@ -99,12 +101,16 @@ export const createCupping = createAsyncThunk('cuppings/create', async (draft: C
     updatedAt: stamp,
   };
   await putCupping(row);
+  // 杯测分数新增即可能改变锅次占用有效性：旧占用需重算
+  await refreshOccupationsAfterCupping();
+  void dispatch(fetchBlends());
+  void dispatch(fetchWriteoffData());
   return listCuppings();
 });
 
 export const updateCupping = createAsyncThunk(
   'cuppings/update',
-  async (input: { id: string; draft: CuppingDraftState }) => {
+  async (input: { id: string; draft: CuppingDraftState }, { dispatch }) => {
     const existing = (await listCuppings()).find((cupping) => cupping.id === input.id);
     const stamp = nowIso();
     const row: Cupping = {
@@ -121,12 +127,20 @@ export const updateCupping = createAsyncThunk(
       updatedAt: stamp,
     };
     await putCupping(row);
+    // 杯测分数改动：引用该锅次的旧占用失效，试配方案转「待替换」，定版方案只留提醒
+    await refreshOccupationsAfterCupping();
+    void dispatch(fetchBlends());
+    void dispatch(fetchWriteoffData());
     return listCuppings();
   },
 );
 
-export const deleteCupping = createAsyncThunk('cuppings/remove', async (id: string) => {
+export const deleteCupping = createAsyncThunk('cuppings/remove', async (id: string, { dispatch }) => {
   await removeCupping(id);
+  // 删除杯测后相关锅次变成「无杯测」，占用同样失效
+  await refreshOccupationsAfterCupping();
+  void dispatch(fetchBlends());
+  void dispatch(fetchWriteoffData());
   return listCuppings();
 });
 

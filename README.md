@@ -90,13 +90,15 @@ sologsb101-1025/
         │   ├── roastprofile.ts # RoastProfile 烘焙记录 + MachineTemplate 载量模板
         │   ├── event.ts        # Event 曲线事件（RoastEvent 别名）
         │   ├── cupping.ts      # Cupping 杯测（权重、加权总分、分档）
-        │   └── blend.ts        # Blend 拼配方案（占比校验）
+        │   ├── blend.ts        # Blend 拼配方案（占比校验、试配/待替换/定版/停用、计划产量）
+        │   └── writeoff.ts     # PotSettlement 锅次核销（成品/留样/损耗）+ PotOccupation 方案按比例占用
         ├── stores/             # Redux Toolkit
         │   ├── beanSlice.ts    # 生豆列表 / 筛选 / 扣减库存
-        │   ├── roastSlice.ts   # 烘焙记录 + 曲线事件草稿 + 载量模板 + 状态流转
-        │   ├── cuppingSlice.ts # 杯测分项草稿 + 加权总分派生 + 总分排序
-        │   ├── blendSlice.ts   # 拼配成分草稿 + 占比校验 + 杯测均分回显
-        │   └── store.ts        # configureStore 汇总 + RootState / AppDispatch + bootstrapData
+        │   ├── roastSlice.ts   # 烘焙记录 + 曲线事件草稿 + 载量模板 + 状态流转 + 机台容量排队
+        │   ├── cuppingSlice.ts # 杯测分项草稿 + 加权总分派生 + 总分排序（改分后失效占用）
+        │   ├── blendSlice.ts   # 拼配成分草稿 + 占比校验 + 杯测均分 + 占用/定版闸门
+        │   ├── writeoffSlice.ts# 锅次核销台账 + 方案占用账 + 机台当天容量排队
+        │   └── store.ts        # configureStore 汇总 5 个 slice + RootState / AppDispatch + bootstrapData
         ├── components/common/
         │   ├── ScoreTag.tsx    # 总分 / RoR / 发展率分档标签
         │   ├── FilterBar.tsx   # 关键字 + 多选下拉，同步 URL query
@@ -111,11 +113,13 @@ sologsb101-1025/
         │   ├── CurveEntry.tsx       # /curves
         │   ├── DevelopmentBoard.tsx # /development
         │   ├── CuppingBoard.tsx     # /cuppings
+        │   ├── WriteoffBoard.tsx    # /writeoff
         │   └── BlendPlan.tsx        # /blends
         ├── router/index.tsx    # 路由表 + ROUTE_META（导航标题）
         └── utils/
             ├── curve.ts        # 温升插值、发展率、分段 RoR、分档与缺节点检测
-            ├── db.ts           # Dexie 实例、版本迁移、播种、级联删除、扣减、快照导入导出
+            ├── writeoff.ts     # 锅次占用/补认/定版闸门的纯领域逻辑
+            ├── db.ts           # Dexie 实例、版本迁移、播种、级联删除、扣减、核销/占用、快照导入导出
             └── export.ts       # 烘焙/杯测/拼配 JSON 导出与结构校验
 ```
 
@@ -128,7 +132,8 @@ sologsb101-1025/
 | `/curves` | 曲线关键点录入：按时间轴排回温/脱水结束/一爆/二爆/下豆并标豆温，HTML5 原生拖拽排序写回 atSec | Event、RoastProfile | FilterBar、StatBadge、EmptyPanel、ScoreTag |
 | `/development` | 发展率与 RoR：按节点算发展时间占比与各段升温速率并给异常提示 | Event、RoastProfile | ScoreTag、FilterBar、StatBadge |
 | `/cuppings` | 杯测评分：五维分项加权总分、分档结论、总分排序 | Cupping、RoastProfile | ScoreTag、EmptyPanel、FilterBar |
-| `/blends` | 拼配方案：占比合计 100% 校验、参与批次杯测均分回显、目标风味登记、JSON 导入导出 | Blend 及全部模型 | FilterBar、StatBadge、EmptyPanel、ScoreTag |
+| `/writeoff` | 锅次核销：登记成品/留样/损耗、方案按比例占用（累计不超剩余量）、杯测改动失效重认、旧数据按豆源/机台/日期补认、机台当天容量排队 | PotSettlement、PotOccupation、RoastProfile、Blend、Cupping | FilterBar、StatBadge、EmptyPanel、ScoreTag |
+| `/blends` | 拼配方案：占比合计 100% 校验、参与批次杯测均分回显、计划产量与占用、定版闸门、目标风味登记、JSON 导入导出 | Blend 及全部模型 | FilterBar、StatBadge、EmptyPanel、ScoreTag |
 
 `/` 与任何未知路径都会重定向到第一个模块路径 `/beans`。
 
@@ -137,15 +142,22 @@ sologsb101-1025/
 ## 五、IndexedDB 库名与数据存储说明
 
 - **库名（Dexie 数据库名）**：`gbroastlog`（`src/utils/db.ts` 里的 `DB_NAME`）。
-- **结构版本号**：`DB_VERSION = 2`
+- **结构版本号**：`DB_VERSION = 3`
   - `version(1).stores({...})`：初版结构（生豆 / 烘焙记录 / 曲线事件 / 杯测 / 拼配方案分表存储）。
   - `version(2).stores({...}).upgrade(async (tx) => {...})`：**真实迁移逻辑**——为全部表补齐 `createdAt/updatedAt` 并加索引、新增 `machineTemplates` 载量模板表、按 `profileId` 分组后依时间顺序补算历史事件的 `rorPerMin`、按分项权重补算历史杯测的 `totalScore`、兜底处理法/状态/配方明细数组等字段。
-- **数据表**：`greenBeans`（生豆）、`roastProfiles`（烘焙记录）、`events`（曲线事件）、`cuppings`（杯测）、`blends`（拼配方案）、`machineTemplates`（载量模板）。
-- **首屏自动播种**：`initDatabase()` 在 `db.greenBeans.count() === 0` 时调用 `seedDatabase()`，灌入三层互相引用的演示数据（4 批生豆 → 4 次烘焙记录 → 15 个曲线节点 / 3 笔杯测 → 3 个拼配方案 + 4 个载量模板），固定 id + `bulkPut`，幂等可重复执行。
+  - `version(3).stores({...}).upgrade(...)`：新增 `potSettlements` 锅次核销表与 `potOccupations` 方案占用表；载量模板补 `dailyCapacityG`（机台当天容量）、烘焙记录补 `queueStatus/queuedAt`（排产/排队）、拼配方案补 `batchG`（计划产量）；旧锅次按默认成品率补「待核销/已报废」台账，旧方案占用按豆源/机台/日期补认，认不出停在「待核销」。
+- **数据表**：`greenBeans`（生豆）、`roastProfiles`（烘焙记录）、`events`（曲线事件）、`cuppings`（杯测）、`blends`（拼配方案）、`machineTemplates`（载量模板）、`potSettlements`（锅次核销）、`potOccupations`（方案占用）。
+- **首屏自动播种**：`initDatabase()` 在 `db.greenBeans.count() === 0` 时调用 `seedDatabase()`，灌入互相引用的演示数据（4 批生豆 → 4 次烘焙记录 → 15 个曲线节点 / 3 笔杯测 → 3 个拼配方案 + 4 个载量模板 + 锅次核销台账与重算后的占用账），固定 id + `bulkPut`，幂等可重复执行。
 - **业务写入规则**：
-  - 删除生豆会级联删除其烘焙记录、曲线事件、杯测，并从拼配配方中摘除相关成分；删除烘焙记录同样级联删除事件、杯测并摘除配方成分。
-  - 烘焙记录状态流转：记录中 → 已完成 / 作废（已完成可作废，作废可恢复记录中）。
-  - **下豆扣减**：记录中状态的烘焙记录标记「已完成」（或录入下豆节点后确认）时，按 `chargeG` 自动扣减对应生豆的 `stockKg`，余量低于 2kg 给出补货提醒；余量不足会被拒绝，且不会重复扣减。
+  - 删除生豆会级联删除其烘焙记录、曲线事件、杯测、锅次核销/占用，并从拼配配方中摘除相关成分；删除烘焙记录同样级联删除事件、杯测、核销/占用并摘除配方成分。
+  - 烘焙记录状态流转：记录中 → 已完成 / 作废（已完成可作废，作废可恢复记录中）；作废会把锅次核销置为「已报废」并释放方案占用。
+  - **下豆扣减**：记录中状态的烘焙记录标记「已完成」（或录入下豆节点后确认）时，按 `chargeG` 自动扣减对应生豆的 `stockKg`，余量低于 2kg 给出补货提醒；余量不足会被拒绝，且不会重复扣减；同时自动生成该锅次的「待核销」台账。
+  - **锅次核销**：`/writeoff` 登记成品 `productG`、留样 `sampleG` 与损耗 `lossG`（= 投豆 - 成品 - 留样）；只有「已核销」锅次才能被占用，成品 + 留样不得大于投豆。
+  - **方案占用**：试配方案按「占比 × 计划产量 `batchG`」切分锅次成品，方案按创建时间先到先得，同一锅次累计占用不能超过 `成品 - 留样 - 已占用`，超卖成分判为失效。
+  - **杯测闸门**：占用要求锅次有杯测且加权总分 ≥ 80；杯测分数在认领之后被改动（`cupping.updatedAt` 晚于占用快照 `cupCheckedAt`）→ 旧占用失效需重新认领，试配方案自动转「待替换」，已定版方案只给提醒不自动改状态。
+  - **旧数据补认**：配方成分缺锅次来源时，按豆源 + 机台 + 日期唯一匹配烘焙记录；多条候选认不出则占用停在「待核销」，可在核销页点「补认锅次」或在拼配页「重新认领」。
+  - **定版闸门**：方案转「定版」时强制校验所有成分均来自「已核销且杯测通过」的锅次且占用全部在账，否则拒绝定版。
+  - **机台容量排队**：同机台同日期「已排产」锅次载量合计超过载量模板的 `dailyCapacityG` 时，新建锅次自动 `queueStatus=queued` 下批排队；有锅次完成/作废/让位释放容量后，按入队时间先进先出自动补位。
   - `/curves` 拖拽排序（HTML5 原生 `draggable`）会保留原有时间集合、按新顺序重排每个节点的 `atSec` 并 `bulkPut` 写回 Dexie。
 - **导入导出**：`/blends` 支持整库档案 JSON 导出/导入（导入前 `parseArchiveJson` 结构校验，导入会清空当前本地库后写入）与单个方案 JSON 导入（`parseBlendJson` 校验占比必须等于 100%）；`/curves`、`/development`、`/cuppings`、`/beans` 也分别提供曲线档案、杯测档案与整库档案的导出。
 - **容器无状态**：没有后端、没有数据库服务、不挂载命名卷；数据只在访问者浏览器里，换浏览器或清除站点数据即恢复到「空库 + 重新播种」状态。
