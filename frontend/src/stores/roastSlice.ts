@@ -7,6 +7,8 @@ import type { Airflow, MachineTemplate, MachineTemplateDraft, RoastProfile, Roas
 import { AIRFLOW_ORDER, ROAST_STATE_LABEL, chargeLevelOf } from '../types/roastprofile';
 import type { RoastEvent, RoastEventDraft, RoastEventType } from '../types/event';
 import {
+  admitQueuedNow,
+  applyScheduleForProfile,
   createId,
   listEvents,
   listMachineTemplates,
@@ -19,6 +21,7 @@ import {
   removeEvent,
   removeMachineTemplate,
   removeRoastProfile,
+  setProfileSchedule,
   updateRoastState,
 } from '../utils/db';
 import { reassignAtSecByOrder, sortEventsByTime, type DevBand } from '../utils/curve';
@@ -95,8 +98,17 @@ export const fetchRoastProfiles = createAsyncThunk('roasts/fetchProfiles', async
 
 export const createRoastProfile = createAsyncThunk('roasts/createProfile', async (draft: RoastProfileDraft) => {
   const stamp = nowIso();
-  const row: RoastProfile = { ...draft, id: createId('rp'), createdAt: stamp, updatedAt: stamp };
+  const row: RoastProfile = {
+    ...draft,
+    scheduleStatus: draft.scheduleStatus ?? 'scheduled',
+    queueOrder: draft.queueOrder ?? 0,
+    id: createId('rp'),
+    createdAt: stamp,
+    updatedAt: stamp,
+  };
   await putRoastProfile(row);
+  // 机台当天容量不足则自动排队（不占容量）
+  await applyScheduleForProfile(row);
   return listRoastProfiles();
 });
 
@@ -108,11 +120,15 @@ export const updateRoastProfile = createAsyncThunk(
     const stamp = nowIso();
     const row: RoastProfile = {
       ...input.draft,
+      scheduleStatus: input.draft.scheduleStatus ?? existing?.scheduleStatus ?? 'scheduled',
+      queueOrder: input.draft.queueOrder ?? existing?.queueOrder ?? 0,
       id: input.id,
       createdAt: existing ? existing.createdAt : stamp,
       updatedAt: stamp,
     };
     await putRoastProfile(row);
+    // 改机台 / 日期 / 载量后重新按当天容量判定排产或排队
+    await applyScheduleForProfile(row);
     return listRoastProfiles();
   },
 );
@@ -130,6 +146,21 @@ export const advanceRoastState = createAsyncThunk(
     return listRoastProfiles();
   },
 );
+
+/** 手动把某批次改为排队 / 提前递补 */
+export const changeSchedule = createAsyncThunk(
+  'roasts/changeSchedule',
+  async (input: { id: string; scheduleStatus: 'scheduled' | 'queued' }) => {
+    await setProfileSchedule(input.id, input.scheduleStatus);
+    return listRoastProfiles();
+  },
+);
+
+/** 容量释放后按排队顺序递补当天排队批次 */
+export const admitQueued = createAsyncThunk('roasts/admitQueued', async () => {
+  await admitQueuedNow();
+  return listRoastProfiles();
+});
 
 /* ------------------------------ 曲线事件 ------------------------------ */
 
@@ -315,9 +346,24 @@ const roastSlice = createSlice({
       })
       .addCase(advanceRoastState.fulfilled, (state, action) => {
         state.profiles = action.payload;
+        state.notice = '烘焙记录状态已流转，锅次占用已同步';
       })
       .addCase(advanceRoastState.rejected, (state, action) => {
         state.error = action.error.message ?? '状态流转失败';
+      })
+      .addCase(changeSchedule.fulfilled, (state, action) => {
+        state.profiles = action.payload;
+        state.notice = '排产 / 排队状态已更新';
+      })
+      .addCase(changeSchedule.rejected, (state, action) => {
+        state.error = action.error.message ?? '排产状态更新失败';
+      })
+      .addCase(admitQueued.fulfilled, (state, action) => {
+        state.profiles = action.payload;
+        state.notice = '已按排队顺序递补当天可排产批次';
+      })
+      .addCase(admitQueued.rejected, (state, action) => {
+        state.error = action.error.message ?? '排队递补失败';
       })
       .addCase(fetchEvents.fulfilled, (state, action) => {
         state.events = action.payload;
@@ -452,6 +498,7 @@ export const selectRoastStats = createSelector([selectRoastState], (roastState) 
     recording: profiles.filter((profile) => profile.state === 'recording').length,
     done: profiles.filter((profile) => profile.state === 'done').length,
     voided: profiles.filter((profile) => profile.state === 'void').length,
+    queued: profiles.filter((profile) => profile.scheduleStatus === 'queued').length,
     averageChargeG: profiles.length > 0 ? Math.round(chargeTotal / profiles.length) : 0,
     models: new Set(profiles.map((profile) => profile.machineModel)).size,
   };

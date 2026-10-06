@@ -63,6 +63,7 @@ import {
 } from '../stores/roastSlice';
 import { fetchCuppings } from '../stores/cuppingSlice';
 import { fetchBlends } from '../stores/blendSlice';
+import { fetchRoastPots } from '../stores/potSlice';
 import {
   AIRFLOW_COLOR,
   AIRFLOW_LABEL,
@@ -237,6 +238,7 @@ export default function CurveEntry() {
   };
 
   const handleProfileSubmit = async (values: ProfileFormValues): Promise<void> => {
+    const existing = editingProfileId ? roastState.profiles.find((profile) => profile.id === editingProfileId) : undefined;
     const draft: RoastProfileDraft = {
       greenBeanId: values.greenBeanId,
       machineModel: values.machineModel.trim(),
@@ -246,14 +248,22 @@ export default function CurveEntry() {
       gasLevel: values.gasLevel,
       roastedAt: values.roastedAt.format('YYYY-MM-DD'),
       state: values.state,
+      // 排队字段由容量规则重新判定，编辑时带上现值做兜底
+      scheduleStatus: existing?.scheduleStatus ?? 'scheduled',
+      queueOrder: existing?.queueOrder ?? 0,
     };
     try {
       if (editingProfileId) {
         await dispatch(updateRoastProfile({ id: editingProfileId, draft })).unwrap();
-        message.success('烘焙记录已更新');
+        message.success('烘焙记录已更新（机台/日期/载量变更后已重新判定排产）');
       } else {
-        await dispatch(createRoastProfile(draft)).unwrap();
-        message.success('烘焙记录已创建，可以开始录入曲线节点');
+        const updated = await dispatch(createRoastProfile(draft)).unwrap();
+        const saved = updated.find((profile) => profile.roastedAt === draft.roastedAt && profile.greenBeanId === draft.greenBeanId);
+        if (saved?.scheduleStatus === 'queued') {
+          message.warning('机台当天容量不足，该批次已进入排队，容量释放后自动递补');
+        } else {
+          message.success('烘焙记录已创建，可以开始录入曲线节点');
+        }
       }
       setProfileDrawerOpen(false);
     } catch (error) {
@@ -270,7 +280,11 @@ export default function CurveEntry() {
       cancelText: '取消',
       async onOk() {
         await dispatch(deleteRoastProfile(profile.id)).unwrap();
-        await Promise.all([dispatch(fetchCuppings()).unwrap(), dispatch(fetchBlends()).unwrap()]);
+        await Promise.all([
+          dispatch(fetchCuppings()).unwrap(),
+          dispatch(fetchBlends()).unwrap(),
+          dispatch(fetchRoastPots()).unwrap(),
+        ]);
         message.success('烘焙记录已删除');
       },
     });
@@ -322,6 +336,7 @@ export default function CurveEntry() {
       cancelText: '稍后处理',
       async onOk() {
         const result = await dispatch(consumeStock(currentProfile.id)).unwrap();
+        await dispatch(fetchRoastPots());
         if (result.ok) {
           message.success(result.message);
         } else {

@@ -60,6 +60,8 @@ import {
   type RoastState,
 } from '../types/roastprofile';
 import { exportCuppingJson } from '../utils/export';
+import { fetchBlends } from '../stores/blendSlice';
+import { fetchRoastPots } from '../stores/potSlice';
 
 interface CuppingFormValues {
   profileId: string;
@@ -202,11 +204,13 @@ export default function CuppingBoard() {
     try {
       if (editingId) {
         await dispatch(updateCupping({ id: editingId, draft })).unwrap();
-        message.success('杯测记录已更新');
+        message.success('杯测记录已更新，相关锅次占用已按新分数失效重认');
       } else {
         await dispatch(createCupping(draft)).unwrap();
         message.success(`杯测记录已保存，加权总分 ${draftTotal.toFixed(1)}（${draftGrade.label}）`);
       }
+      // 杯测变动会重算锅次占用：试配方案可能转待替换，同步刷新方案与台账
+      await Promise.all([dispatch(fetchBlends()), dispatch(fetchRoastPots())]);
       setModalOpen(false);
     } catch (error) {
       message.error(`保存失败：${error instanceof Error ? error.message : '未知错误'}`);
@@ -222,7 +226,8 @@ export default function CuppingBoard() {
       cancelText: '取消',
       async onOk() {
         await dispatch(deleteCupping(row.id)).unwrap();
-        message.success('杯测记录已删除');
+        await Promise.all([dispatch(fetchBlends()), dispatch(fetchRoastPots())]);
+        message.success('杯测记录已删除，相关锅次占用已失效重认');
       },
     });
   };

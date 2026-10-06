@@ -105,3 +105,28 @@ export function averageScore(cuppings: Pick<Cupping, 'totalScore'>[]): number {
   if (cuppings.length === 0) return 0;
   return Math.round((cuppings.reduce((acc, item) => acc + item.totalScore, 0) / cuppings.length) * 10) / 10;
 }
+
+/**
+ * 杯测通过线：总分 ≥ 80（良好档下限）才算杯测通过。
+ * 锅次核销后定版时，只允许使用「已核销且杯测通过」的锅次。
+ */
+export const CUPPING_PASS_SCORE = 80;
+
+export function isCuppingPassed(score: number): boolean {
+  return Number.isFinite(score) && score >= CUPPING_PASS_SCORE;
+}
+
+/** 某锅次最新一笔杯测（按杯测日期倒序，没有则 undefined） */
+export function latestCuppingOf<T extends Pick<Cupping, 'cuppedAt'>>(cuppings: T[]): T | undefined {
+  if (cuppings.length === 0) return undefined;
+  return [...cuppings].sort((a, b) => b.cuppedAt.localeCompare(a.cuppedAt))[0];
+}
+
+/**
+ * 锅次杯测签名：杯测笔数 + 按日期升序的总分序列。
+ * 杯测分数（含新增 / 删除杯测）一旦改动，签名就变化，占用据此判定失效重认。
+ */
+export function cuppingSignatureOf(cuppings: Array<Pick<Cupping, 'cuppedAt' | 'totalScore'>>): string {
+  const ordered = [...cuppings].sort((a, b) => a.cuppedAt.localeCompare(b.cuppedAt));
+  return `${ordered.length}:${ordered.map((item) => item.totalScore).join('/')}`;
+}

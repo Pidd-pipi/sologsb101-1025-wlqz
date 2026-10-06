@@ -238,10 +238,14 @@ export function parseBlendJson(text: string): BlendDraft {
   }
 
   const targetFlavor = typeof wrapped.targetFlavor === 'string' ? wrapped.targetFlavor.trim() : '';
+  const rawBatch = Number(wrapped.targetBatchKg);
+  const targetBatchKg = Number.isFinite(rawBatch) && rawBatch > 0 ? Math.round(rawBatch * 1000) / 1000 : 1;
   return {
     name,
     items,
     targetFlavor,
+    targetBatchKg,
+    pendingReplace: false,
     createdAt: pickDate(wrapped.createdAt),
     state: pickState(wrapped.state),
   };

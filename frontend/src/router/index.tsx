@@ -15,6 +15,7 @@ export type { RouteMeta };
 
 const BeanList = lazy(() => import('../pages/BeanList'));
 const MachineConfig = lazy(() => import('../pages/MachineConfig'));
+const PotVerify = lazy(() => import('../pages/PotVerify'));
 const CurveEntry = lazy(() => import('../pages/CurveEntry'));
 const DevelopmentBoard = lazy(() => import('../pages/DevelopmentBoard'));
 const CuppingBoard = lazy(() => import('../pages/CuppingBoard'));
@@ -38,6 +39,7 @@ export const appRoutes: RouteObject[] = [
       { index: true, element: <Navigate to={ROUTES.beans} replace /> },
       { path: 'beans', element: withSuspense(<BeanList />) },
       { path: 'machines', element: withSuspense(<MachineConfig />) },
+      { path: 'pots', element: withSuspense(<PotVerify />) },
       { path: 'curves', element: withSuspense(<CurveEntry />) },
       { path: 'development', element: withSuspense(<DevelopmentBoard />) },
       { path: 'cuppings', element: withSuspense(<CuppingBoard />) },

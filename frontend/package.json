@@ -8,7 +8,8 @@
     "dev": "vite --host --port 22825",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host --port 22825",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:pots": "esbuild scripts/test-pot.mts scripts/test-migration.mts --bundle --platform=node --format=esm --outdir=scripts --out-extension:.js=.bundle.mjs --log-level=warning && node scripts/test-pot.bundle.mjs && node scripts/test-migration.bundle.mjs && rm -f scripts/*.bundle.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.1",
@@ -26,6 +27,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "~5.6.3",
     "vite": "^5.4.11"
   }

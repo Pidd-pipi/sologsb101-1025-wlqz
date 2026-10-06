@@ -32,7 +32,9 @@ import {
   ExportOutlined,
   ImportOutlined,
   PlusOutlined,
+  ReloadOutlined,
   SwapOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import FilterBar, { type FilterSelectConfig } from '../components/common/FilterBar';
@@ -52,6 +54,7 @@ import {
   fetchBlends,
   importBlendDraft,
   loadBlendDraft,
+  reconfirmBlend,
   removeDraftItem,
   resetBlendDraft,
   resetBlendFilters,
@@ -63,19 +66,24 @@ import {
   selectDraftRatioTotal,
   selectDraftRatioValid,
   selectFilteredBlendRows,
+  setBlendDraftField,
   setBlendFilters,
   setDraftItems,
   updateBlend,
   type BlendRow,
 } from '../stores/blendSlice';
+import { fetchRoastPots, selectPotState } from '../stores/potSlice';
 import {
   BLEND_STATE_COLOR,
   BLEND_STATE_FLOW,
   BLEND_STATE_LABEL,
   BLEND_STATE_OPTIONS,
   RATIO_TOLERANCE,
+  TARGET_BATCH_MAX_KG,
+  TARGET_BATCH_MIN_KG,
   TARGET_FLAVOR_OPTIONS,
   isRatioValid,
+  occupyKgOfItem,
   ratioMessage,
   splitFlavors,
   totalRatioPct,
@@ -84,6 +92,7 @@ import {
 } from '../types/blend';
 import { ROAST_STATE_LABEL } from '../types/roastprofile';
 import { BEAN_PROCESS_LABEL } from '../types/greenbean';
+import { CUPPING_PASS_SCORE } from '../types/cupping';
 import {
   describeError,
   exportArchiveJson,
@@ -93,10 +102,13 @@ import {
 } from '../utils/export';
 import { exportSnapshot, importSnapshot } from '../utils/db';
 import type { Blend } from '../types/blend';
+import { POT_STATUS_LABEL } from '../types/pot';
+import { availableKg, occupiedKg } from '../types/pot';
 
 interface BlendFormValues {
   name: string;
   targetFlavor: string[];
+  targetBatchKg: number;
   createdAt: Dayjs;
   state: BlendState;
   items: BlendItem[];
@@ -122,6 +134,7 @@ export default function BlendPlan() {
   const beanState = useAppSelector(selectBeanState);
   const roastState = useAppSelector(selectRoastState);
   const cuppingState = useAppSelector(selectCuppingState);
+  const potState = useAppSelector(selectPotState);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -131,6 +144,7 @@ export default function BlendPlan() {
     void dispatch(fetchGreenBeans());
     void dispatch(fetchRoastProfiles());
     void dispatch(fetchCuppings());
+    void dispatch(fetchRoastPots());
   }, [dispatch]);
 
   const beanMap = useMemo(() => new Map(beanState.greenBeans.map((bean) => [bean.id, bean])), [beanState.greenBeans]);
@@ -138,6 +152,8 @@ export default function BlendPlan() {
     () => new Map(roastState.profiles.map((profile) => [profile.id, profile])),
     [roastState.profiles],
   );
+  /** profileId → 锅次台账（含剩余 / 状态），表单与列表共用 */
+  const potByProfile = useMemo(() => new Map(potState.pots.map((pot) => [pot.profileId, pot])), [potState.pots]);
 
   /** 某条烘焙记录已录入的杯测分（用于配方行内回显） */
   const scoresOfProfile = useMemo(() => {
@@ -189,6 +205,7 @@ export default function BlendPlan() {
     form.setFieldsValue({
       name: '',
       targetFlavor: [],
+      targetBatchKg: blendState.draft.targetBatchKg || 1,
       createdAt: dayjs(),
       state: 'trial',
       items: [
@@ -213,6 +230,7 @@ export default function BlendPlan() {
     form.setFieldsValue({
       name: blend.name,
       targetFlavor: splitFlavors(blend.targetFlavor),
+      targetBatchKg: blend.targetBatchKg || 1,
       createdAt: dayjs(blend.createdAt),
       state: blend.state,
       items: blend.items.length > 0 ? blend.items.map((item) => ({ ...item })) : [{ greenBeanId: '', profileId: '', ratioPct: 0 }],
@@ -267,6 +285,7 @@ export default function BlendPlan() {
       name: values.name.trim(),
       items,
       targetFlavor: values.targetFlavor ?? [],
+      targetBatchKg: values.targetBatchKg,
       createdAt: values.createdAt.format('YYYY-MM-DD'),
       state: values.state,
     };
@@ -299,8 +318,48 @@ export default function BlendPlan() {
   };
 
   const handleAdvanceState = async (row: BlendRow, next: BlendState): Promise<void> => {
-    await dispatch(advanceBlendState({ id: row.id, state: next })).unwrap();
-    message.success(`方案「${row.name}」已流转为「${BLEND_STATE_LABEL[next]}」`);
+    if (next === 'final' && !row.finalizable) {
+      modal.warning({
+        title: `方案「${row.name}」暂不能定版`,
+        content: (
+          <Space direction="vertical" size={4}>
+            <span>定版只允许使用「已核销且杯测通过（≥ {CUPPING_PASS_SCORE} 分）」的锅次：</span>
+            {row.blockers.map((blocker) => (
+              <span key={blocker}>· {blocker}</span>
+            ))}
+          </Space>
+        ),
+        okText: '知道了',
+      });
+      return;
+    }
+    try {
+      await dispatch(advanceBlendState({ id: row.id, state: next })).unwrap();
+      message.success(`方案「${row.name}」已流转为「${BLEND_STATE_LABEL[next]}」`);
+    } catch (error) {
+      message.warning(typeof error === 'string' ? error : `状态流转失败`);
+    }
+  };
+
+  /** 试配方案杯测改动 / 锅次异常后重新认领失效占用 */
+  const handleReconfirm = async (row: BlendRow): Promise<void> => {
+    try {
+      await dispatch(reconfirmBlend(row.id)).unwrap();
+      message.success(`方案「${row.name}」已重新认领锅次占用`);
+    } catch (payload) {
+      const messages = (payload as { messages?: string[] } | undefined)?.messages ?? ['重新认领失败'];
+      modal.warning({
+        title: `方案「${row.name}」还不能重新认领`,
+        content: (
+          <Space direction="vertical" size={4}>
+            {messages.map((item) => (
+              <span key={item}>· {item}</span>
+            ))}
+          </Space>
+        ),
+        okText: '知道了',
+      });
+    }
   };
 
   /* ------------------------------ 导出 / 导入 ------------------------------ */
@@ -457,6 +516,54 @@ export default function BlendPlan() {
       render: (value: string) => <span className="gb-mono">{value}</span>,
     },
     {
+      title: '锅次占用 / 待替换',
+      key: 'pot',
+      width: 220,
+      render: (_value, row) => {
+        const perItem = row.items.map((item) => {
+          const pot = potByProfile.get(item.profileId);
+          const occupy = occupyKgOfItem(item, row.targetBatchKg || 1);
+          return { item, pot, occupy };
+        });
+        const remainTotal = perItem.reduce(
+          (acc, entry) => acc + (entry.pot ? Math.max(availableKg(entry.pot), 0) : 0),
+          0,
+        );
+        return (
+          <Space direction="vertical" size={2}>
+            <Space size={4} wrap>
+              <Tag color={row.finalizable ? '#2f6f4f' : '#b3372f'}>
+                生效成分 {row.activeItemCount}/{row.items.length}
+              </Tag>
+              <span className="gb-mono gb-muted">批量 {row.targetBatchKg || 1}kg · 剩余合计 {Math.round(remainTotal * 1000) / 1000}kg</span>
+            </Space>
+            {perItem.map((entry, index) => (
+              <span key={`${entry.item.profileId}-${index}`} className="gb-muted" style={{ fontSize: 12 }}>
+                {entry.pot
+                  ? `${POT_STATUS_LABEL[entry.pot.status]} · 占 ${entry.occupy}kg / 剩 ${Math.max(
+                      Math.round(availableKg(entry.pot) * 1000) / 1000,
+                      0,
+                    )}kg`
+                  : '无锅次来源（待核销/补认）'}
+              </span>
+            ))}
+            {row.pendingReplace ? (
+              <Tag icon={<WarningOutlined />} color="#b3372f">
+                待替换
+              </Tag>
+            ) : null}
+            {row.reminders.length > 0 ? (
+              <Tooltip title={row.reminders.map((item, index) => `${index + 1}. ${item}`).join('\n')}>
+                <Tag icon={<WarningOutlined />} color="#d48806">
+                  定版提醒 {row.reminders.length}
+                </Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
+        );
+      },
+    },
+    {
       title: '状态',
       dataIndex: 'state',
       key: 'state',
@@ -471,16 +578,31 @@ export default function BlendPlan() {
       render: (_value, row) => (
         <Space size={4} wrap>
           {BLEND_STATE_FLOW[row.state].map((next) => (
-            <Button
+            <Tooltip
               key={next}
-              size="small"
-              type={next === 'final' ? 'primary' : 'default'}
-              icon={<SwapOutlined />}
-              onClick={() => void handleAdvanceState(row, next)}
+              title={next === 'final' && !row.finalizable ? `定版门槛未满足：${row.blockers.join('；')}` : undefined}
             >
-              {BLEND_STATE_LABEL[next]}
-            </Button>
+              <Button
+                size="small"
+                type={next === 'final' ? 'primary' : 'default'}
+                danger={next === 'retired'}
+                disabled={next === 'final' && !row.finalizable}
+                icon={<SwapOutlined />}
+                onClick={() => void handleAdvanceState(row, next)}
+              >
+                {BLEND_STATE_LABEL[next]}
+              </Button>
+            </Tooltip>
           ))}
+          {row.state === 'trial' && row.pendingReplace ? (
+            <Button size="small" type="primary"
+              ghost
+              icon={<ReloadOutlined />}
+              onClick={() => void handleReconfirm(row)}
+            >
+              重新认领
+            </Button>
+          ) : null}
           <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(row)}>
             编辑
           </Button>
@@ -544,7 +666,14 @@ export default function BlendPlan() {
           <StatBadge label="占比合规" value={stats.valid} suffix=" 个" tone="green" />
           <StatBadge label="占比待调整" value={stats.invalid} suffix=" 个" tone="red" />
           <StatBadge label="已定版" value={stats.finalized} suffix=" 个" tone="purple" />
-          <StatBadge label="参批次均分" value={stats.averageScore} suffix=" 分" tone="gold" />
+          <StatBadge
+            label="待替换"
+            value={stats.pendingReplace}
+            suffix=" 个"
+            tone={stats.pendingReplace > 0 ? 'red' : 'green'}
+          />
+          <StatBadge label="可定版" value={stats.finalizable} suffix=" 个" tone="gold" />
+          <StatBadge label="参批次均分" value={stats.averageScore} suffix=" 分" tone="blue" />
         </div>
         <Typography.Paragraph className="gb-muted" style={{ marginBottom: 12 }}>
           占比校验：各成分 ratioPct 合计必须等于 100%（容差 ±{RATIO_TOLERANCE}%）；参与批次杯测均分由配方引用的烘焙记录自动回显。
@@ -571,7 +700,7 @@ export default function BlendPlan() {
             loading={blendState.loading}
             columns={columns}
             dataSource={rows}
-            scroll={{ x: 1460 }}
+            scroll={{ x: 1760 }}
             pagination={{ pageSize: 6, showTotal: (total) => `共 ${total} 个方案` }}
           />
         )}
@@ -619,6 +748,32 @@ export default function BlendPlan() {
             <Form.Item name="state" label="状态" rules={[{ required: true, message: '请选择状态' }]}>
               <Select style={{ width: 160 }} options={BLEND_STATE_OPTIONS} />
             </Form.Item>
+            <Form.Item
+              name="targetBatchKg"
+              label="目标批量（kg）"
+              tooltip="各成分按占比折算锅次占用：占用 = 目标批量 × 占比%，同一口锅多方案累计占用不能超过剩余成品"
+              rules={[
+                { required: true, message: '请填写目标批量' },
+                {
+                  validator: (_rule, value: number) =>
+                    Number.isFinite(value) && value >= TARGET_BATCH_MIN_KG && value <= TARGET_BATCH_MAX_KG
+                      ? Promise.resolve()
+                      : Promise.reject(new Error(`目标批量应在 ${TARGET_BATCH_MIN_KG} - ${TARGET_BATCH_MAX_KG}kg 之间`)),
+                },
+              ]}
+            >
+              <InputNumber
+                min={TARGET_BATCH_MIN_KG}
+                max={TARGET_BATCH_MAX_KG}
+                step={0.05}
+                precision={3}
+                style={{ width: 170 }}
+                addonAfter="kg"
+                onChange={(value) => {
+                  if (value !== null) dispatch(setBlendDraftField({ field: 'targetBatchKg', value: Number(value) }));
+                }}
+              />
+            </Form.Item>
           </Space>
 
           <Divider orientation="left" plain>
@@ -637,6 +792,9 @@ export default function BlendPlan() {
                 <Tag color={draftRatioValid ? '#2f6f4f' : '#b3372f'}>{draftRatioValid ? '校验通过' : '校验未通过'}</Tag>
                 <span className="gb-muted">{ratioMessage(draftItems)}</span>
                 <span className="gb-muted">参与批次杯测均分：{draftAverageScore || '暂无'}</span>
+                <span className="gb-muted">
+                  保存后按目标批量 × 占比占用锅次；杯测改动会让试配方案转待替换，定版只用已核销且杯测 ≥ {CUPPING_PASS_SCORE} 分的锅次
+                </span>
               </Space>
             }
           />
@@ -714,6 +872,35 @@ export default function BlendPlan() {
                             })()}
                           </Tag>
                         </Tooltip>
+                        {(() => {
+                          const profileId = form.getFieldValue(['items', name, 'profileId']) as string | undefined;
+                          const ratio = Number(form.getFieldValue(['items', name, 'ratioPct']) ?? 0);
+                          const pot = profileId ? potByProfile.get(profileId) : undefined;
+                          const occupy = occupyKgOfItem(
+                            { greenBeanId: '', profileId: profileId ?? '', ratioPct: ratio },
+                            Number(form.getFieldValue('targetBatchKg')) || 1,
+                          );
+                          if (!pot) {
+                            return (
+                              <Tooltip title="该烘焙记录还没有锅次台账（下豆完成后自动建锅，待核销登记）">
+                                <Tag color="#c9963c">无锅次 · 占 {occupy}kg</Tag>
+                              </Tooltip>
+                            );
+                          }
+                          const remain = Math.max(availableKg(pot), 0);
+                          const enough = occupy <= remain + 1e-6 && pot.status === 'verified';
+                          const scoreTag =
+                            pot.lastScore !== null && pot.lastScore < CUPPING_PASS_SCORE ? ` · 杯测 ${pot.lastScore} 未过` : '';
+                          return (
+                            <Tooltip
+                              title={`${POT_STATUS_LABEL[pot.status]} · 已占 ${occupiedKg(pot)}kg / 剩余 ${remain}kg${scoreTag}`}
+                            >
+                              <Tag color={enough ? '#2f6f4f' : '#b3372f'}>
+                                {POT_STATUS_LABEL[pot.status]} · 占 {occupy}kg / 剩 {remain}kg
+                              </Tag>
+                            </Tooltip>
+                          );
+                        })()}
                         <Button
                           danger
                           type="text"

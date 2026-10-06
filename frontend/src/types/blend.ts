@@ -21,6 +21,16 @@ export interface Blend {
   items: BlendItem[];
   /** 目标风味（多个用「、」连接） */
   targetFlavor: string;
+  /**
+   * 目标批量（kg）：按各成分占比折算每口锅的占用重量
+   * （某成分占用 = 目标批量 × ratioPct / 100）。旧数据缺省按 1kg 兜底。
+   */
+  targetBatchKg: number;
+  /**
+   * 待替换：试配方案占用的锅次杯测分数改动 / 锅次报废 / 补认未核销后，
+   * 占用失效，方案转「待替换」等待重新认领锅次；已定版方案不置此标记，只保留提醒。
+   */
+  pendingReplace: boolean;
   /** 创建日期（YYYY-MM-DD） */
   createdAt: string;
   /** 状态：试配 / 定版 / 停用 */
@@ -91,6 +101,19 @@ export function ratioMessage(items: BlendItem[]): string {
 /** 空白配方行 */
 export function createEmptyBlendItem(): BlendItem {
   return { greenBeanId: '', profileId: '', ratioPct: 0 };
+}
+
+/** 旧数据缺省目标批量（kg） */
+export const DEFAULT_TARGET_BATCH_KG = 1;
+
+/** 目标批量合法区间（kg） */
+export const TARGET_BATCH_MIN_KG = 0.1;
+export const TARGET_BATCH_MAX_KG = 100;
+
+/** 某成分按占比折算的锅次占用重量（kg，保留 3 位小数） */
+export function occupyKgOfItem(item: BlendItem, targetBatchKg: number): number {
+  const batch = Number.isFinite(targetBatchKg) && targetBatchKg > 0 ? targetBatchKg : DEFAULT_TARGET_BATCH_KG;
+  return Math.round((batch * (item.ratioPct || 0)) / 100 / 0.001) * 0.001;
 }
 
 /** 目标风味字符串 ↔ 多选数组 */

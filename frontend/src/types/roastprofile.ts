@@ -6,6 +6,13 @@
 export type Airflow = 'closed' | 'half' | 'open';
 export type RoastState = 'recording' | 'done' | 'void';
 
+/**
+ * 排产状态：机台当天容量不足时新锅次进入排队（queued），不占用当天容量；
+ * 容量释放（记录作废 / 日期改期）后按排队顺序 admit（scheduled）。
+ * 排队中的锅次不产生成品，锅次台账里也不会出现。
+ */
+export type ScheduleStatus = 'scheduled' | 'queued';
+
 export interface RoastProfile {
   id: string;
   /** 关联生豆 */
@@ -24,6 +31,10 @@ export interface RoastProfile {
   roastedAt: string;
   /** 状态：记录中 / 已完成 / 作废 */
   state: RoastState;
+  /** 排产：已排产 / 排队中（机台当天容量不足） */
+  scheduleStatus: ScheduleStatus;
+  /** 排队序号：queued 时按该序号依次递补，scheduled 时为 0 */
+  queueOrder: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -41,6 +52,11 @@ export interface MachineTemplate {
   gasLevel: number;
   /** 常用载量（克） */
   chargeG: number;
+  /**
+   * 机台当天容量（克）：同机台、同烘焙日期的「已排产且未作废」锅次载量合计不得超过该值；
+   * 为空或 0 表示不限制。容量不足时新批次进入排队。
+   */
+  dailyCapacityG: number | null;
   /** 备注：如「满锅」「样品烘焙」 */
   note: string;
   createdAt: string;
@@ -105,6 +121,38 @@ export const MACHINE_MODEL_OPTIONS = [
 ];
 
 export const MACHINE_MODEL_FALLBACK = MACHINE_MODEL_OPTIONS[0];
+
+export const SCHEDULE_STATUS_LABEL: Record<ScheduleStatus, string> = {
+  scheduled: '已排产',
+  queued: '排队中',
+};
+
+export const SCHEDULE_STATUS_COLOR: Record<ScheduleStatus, string> = {
+  scheduled: '#2f6f4f',
+  queued: '#3b7ea1',
+};
+
+/**
+ * 机台当天容量判定：
+ * 统计同机台、同日期「已排产（scheduled）且未作废（state !== 'void'）」的载量合计，
+ * 追加 additionalG 后是否仍不超过容量。容量为空 / 0 表示不限量。
+ */
+export function isWithinDailyCapacity(input: {
+  dailyCapacityG: number | null | undefined;
+  scheduledChargeTotalG: number;
+  additionalG: number;
+}): boolean {
+  const capacity = input.dailyCapacityG ?? 0;
+  if (!Number.isFinite(capacity) || capacity <= 0) return true;
+  return input.scheduledChargeTotalG + input.additionalG <= capacity + 1e-6;
+}
+
+/** 当天剩余容量（克）；不限量时返回 null */
+export function remainingDailyCapacityG(dailyCapacityG: number | null | undefined, scheduledChargeTotalG: number): number | null {
+  const capacity = dailyCapacityG ?? 0;
+  if (!Number.isFinite(capacity) || capacity <= 0) return null;
+  return Math.max(0, Math.round((capacity - scheduledChargeTotalG) * 100) / 100);
+}
 
 /** 载量分档提示：用于机型页的载量区间参考 */
 export function chargeLevelOf(chargeG: number): 'sample' | 'standard' | 'full' {

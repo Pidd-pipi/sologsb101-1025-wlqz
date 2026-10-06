@@ -11,6 +11,7 @@
 export const ROUTES = {
   beans: '/beans',
   machines: '/machines',
+  pots: '/pots',
   curves: '/curves',
   development: '/development',
   cuppings: '/cuppings',
@@ -26,9 +27,10 @@ export interface RouteMeta {
 /** 导航标题与说明（App 侧边栏与 document.title 共用） */
 export const ROUTE_META: RouteMeta[] = [
   { path: ROUTES.beans, title: '生豆档案', description: '产地/处理法/在库重量与到货天数' },
-  { path: ROUTES.machines, title: '机型与载量', description: '机型、风门火力档与常用载量模板' },
+  { path: ROUTES.machines, title: '机型与载量', description: '机型、风门火力档、当天容量与排队' },
+  { path: ROUTES.pots, title: '锅次核销', description: '成品/留样/损耗登记与成品占用' },
   { path: ROUTES.curves, title: '烘焙曲线', description: '关键节点录入、时间轴排序与缺节点补录' },
   { path: ROUTES.development, title: '发展率与 RoR', description: '发展时间占比、分段升温速率与异常提示' },
   { path: ROUTES.cuppings, title: '杯测评分', description: '分项加权总分、分档结论与总分排序' },
-  { path: ROUTES.blends, title: '拼配方案', description: '占比 100% 校验、杯测均分回显与 JSON 导入导出' },
+  { path: ROUTES.blends, title: '拼配方案', description: '占比 100% 校验、锅次占用与定版门槛' },
 ];

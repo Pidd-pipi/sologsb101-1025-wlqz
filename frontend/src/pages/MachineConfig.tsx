@@ -40,6 +40,8 @@ import { useAppDispatch, useAppSelector } from '../stores/store';
 import { consumeStock, selectBeanState } from '../stores/beanSlice';
 import {
   advanceRoastState,
+  admitQueued,
+  changeSchedule,
   deleteRoastProfile,
   fetchMachineTemplates,
   fetchRoastProfiles,
@@ -54,6 +56,7 @@ import {
 } from '../stores/roastSlice';
 import { fetchCuppings } from '../stores/cuppingSlice';
 import { fetchBlends } from '../stores/blendSlice';
+import { fetchRoastPots } from '../stores/potSlice';
 import {
   AIRFLOW_COLOR,
   AIRFLOW_LABEL,
@@ -65,7 +68,10 @@ import {
   ROAST_STATE_FLOW,
   ROAST_STATE_LABEL,
   ROAST_STATE_OPTIONS,
+  SCHEDULE_STATUS_COLOR,
+  SCHEDULE_STATUS_LABEL,
   chargeLevelOf,
+  remainingDailyCapacityG,
   type Airflow,
   type MachineTemplate,
   type MachineTemplateDraft,
@@ -74,6 +80,7 @@ import {
 } from '../types/roastprofile';
 import type { RoastEvent } from '../types/event';
 import { LOW_STOCK_KG } from '../types/greenbean';
+import { scheduledChargeOfDay } from '../utils/pot';
 
 const CHARGE_LEVEL_OPTIONS = (['sample', 'standard', 'full'] as const).map((value) => ({
   value,
@@ -118,6 +125,22 @@ export default function MachineConfig() {
     return counter;
   }, [eventsTable.rows]);
 
+  /** 机型 → 当天容量（取该机型模板的最小非空容量；未配置为不限量） */
+  const capacityByModel = useMemo(() => {
+    const map = new Map<string, number | null>();
+    roastState.machines.forEach((machine) => {
+      const capacity = Number.isFinite(machine.dailyCapacityG) && (machine.dailyCapacityG ?? 0) > 0 ? machine.dailyCapacityG! : null;
+      const prev = map.get(machine.model);
+      map.set(machine.model, prev === undefined ? capacity : prev === null ? capacity : capacity === null ? prev : Math.min(prev, capacity));
+    });
+    return map;
+  }, [roastState.machines]);
+
+  const queuedCount = useMemo(
+    () => roastState.profiles.filter((profile) => profile.scheduleStatus === 'queued').length,
+    [roastState.profiles],
+  );
+
   const selects: FilterSelectConfig[] = [
     {
       key: 'model',
@@ -146,6 +169,7 @@ export default function MachineConfig() {
       airflow: 'half',
       gasLevel: 4,
       chargeG: 500,
+      dailyCapacityG: null,
       note: '',
     });
     setModalOpen(true);
@@ -158,6 +182,7 @@ export default function MachineConfig() {
       airflow: template.airflow,
       gasLevel: template.gasLevel,
       chargeG: template.chargeG,
+      dailyCapacityG: template.dailyCapacityG,
       note: template.note,
     });
     setModalOpen(true);
@@ -208,7 +233,11 @@ export default function MachineConfig() {
         cancelText: '取消',
         async onOk() {
           const result = await dispatch(consumeStock(profile.id)).unwrap();
-          await Promise.all([dispatch(fetchRoastProfiles()).unwrap(), dispatch(fetchMachineTemplates()).unwrap()]);
+          await Promise.all([
+            dispatch(fetchRoastProfiles()).unwrap(),
+            dispatch(fetchMachineTemplates()).unwrap(),
+            dispatch(fetchRoastPots()).unwrap(),
+          ]);
           if (result.ok) {
             message.success(result.message);
           } else {
@@ -220,10 +249,19 @@ export default function MachineConfig() {
     }
     try {
       await dispatch(advanceRoastState({ id: profile.id, state: next })).unwrap();
+      await Promise.all([dispatch(fetchRoastPots()).unwrap(), dispatch(fetchBlends()).unwrap()]);
       message.success(`记录状态已更新为「${ROAST_STATE_LABEL[next]}」`);
     } catch (error) {
       message.error(`状态流转失败：${error instanceof Error ? error.message : '未知错误'}`);
     }
+  };
+
+  const handleQueueToggle = async (profile: RoastProfile): Promise<void> => {
+    const next = profile.scheduleStatus === 'queued' ? 'scheduled' : 'queued';
+    await dispatch(changeSchedule({ id: profile.id, scheduleStatus: next })).unwrap();
+    if (next === 'scheduled') await dispatch(admitQueued()).unwrap();
+    await dispatch(fetchRoastPots());
+    message.success(next === 'queued' ? '该批次已改为排队' : '该批次已递补排产');
   };
 
   const handleDeleteProfile = (profile: RoastProfile): void => {
@@ -241,6 +279,7 @@ export default function MachineConfig() {
         await Promise.all([
           dispatch(fetchCuppings()).unwrap(),
           dispatch(fetchBlends()).unwrap(),
+          dispatch(fetchRoastPots()).unwrap(),
         ]);
         message.success('烘焙记录及其关联数据已删除');
       },
@@ -286,6 +325,15 @@ export default function MachineConfig() {
           <Tag>{CHARGE_LEVEL_LABEL[chargeLevelOf(value)]}</Tag>
         </Space>
       ),
+    },
+    {
+      title: '当天容量',
+      dataIndex: 'dailyCapacityG',
+      key: 'dailyCapacityG',
+      width: 130,
+      sorter: (a, b) => (a.dailyCapacityG ?? 0) - (b.dailyCapacityG ?? 0),
+      render: (value: number | null) =>
+        value ? <Tag color="#3b7ea1">{value} g / 天</Tag> : <Tag>不限量</Tag>,
     },
     {
       title: '备注',
@@ -372,10 +420,39 @@ export default function MachineConfig() {
     },
     {
       title: '状态',
-      dataIndex: 'state',
       key: 'state',
-      width: 100,
-      render: (value: RoastState) => <Tag color={ROAST_STATE_COLOR[value]}>{ROAST_STATE_LABEL[value]}</Tag>,
+      width: 150,
+      render: (_value, record) => (
+        <Space direction="vertical" size={0}>
+          <Tag color={ROAST_STATE_COLOR[record.state]}>{ROAST_STATE_LABEL[record.state]}</Tag>
+          <Tag color={SCHEDULE_STATUS_COLOR[record.scheduleStatus]}>
+            {SCHEDULE_STATUS_LABEL[record.scheduleStatus]}
+            {record.scheduleStatus === 'queued' ? ` · 第 ${record.queueOrder} 位` : ''}
+          </Tag>
+        </Space>
+      ),
+    },
+    {
+      title: '当天容量',
+      key: 'capacity',
+      width: 150,
+      render: (_value, record) => {
+        const capacity = capacityByModel.get(record.machineModel) ?? null;
+        if (capacity === null) return <span className="gb-muted">不限量</span>;
+        const used = scheduledChargeOfDay(roastState.profiles, record.machineModel, record.roastedAt);
+        const remaining = remainingDailyCapacityG(capacity, used);
+        const tight = remaining !== null && remaining < record.chargeG;
+        return (
+          <Space direction="vertical" size={0}>
+            <span className="gb-mono">
+              {used} / {capacity} g
+            </span>
+            <Typography.Text type={tight ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
+              剩余 {remaining}g{record.scheduleStatus === 'queued' ? '（排队不占容量）' : ''}
+            </Typography.Text>
+          </Space>
+        );
+      },
     },
     {
       title: '状态流转 / 操作',
@@ -390,12 +467,16 @@ export default function MachineConfig() {
               size="small"
               type={next === 'done' ? 'primary' : 'default'}
               danger={next === 'void'}
+              disabled={next === 'done' && record.scheduleStatus === 'queued'}
               icon={next === 'done' ? <DownOutlined /> : next === 'recording' ? <ReloadOutlined /> : <ThunderboltOutlined />}
               onClick={() => handleAdvanceState(record, next)}
             >
               {next === 'done' ? '完成并扣减' : next === 'void' ? '作废' : '恢复记录中'}
             </Button>
           ))}
+          <Button size="small" type="link" onClick={() => void handleQueueToggle(record)}>
+            {record.scheduleStatus === 'queued' ? '递补排产' : '改为排队'}
+          </Button>
           <Button size="small" type="link" danger icon={<DeleteOutlined />} onClick={() => handleDeleteProfile(record)}>
             删除
           </Button>
@@ -506,12 +587,35 @@ export default function MachineConfig() {
             tone="blue"
           />
           <StatBadge
+            label="排队批次"
+            value={queuedCount}
+            suffix=" 批"
+            tone={queuedCount > 0 ? 'red' : 'green'}
+          />
+          <StatBadge
             label="低余量生豆"
             value={beanState.greenBeans.filter((bean) => bean.stockKg < LOW_STOCK_KG).length}
             suffix=" 批"
             tone="red"
           />
         </div>
+
+        {queuedCount > 0 ? (
+          <Typography.Paragraph type="warning" style={{ marginBottom: 12 }}>
+            有 {queuedCount} 批因机台当天容量不足在排队。作废 / 改期释放容量后会自动按序递补，也可以
+            <Button
+              type="link"
+              size="small"
+              onClick={async () => {
+                await dispatch(admitQueued()).unwrap();
+                message.success('已按排队顺序递补');
+              }}
+            >
+              立即递补
+            </Button>
+            。排队批次不占当天容量，也不能下豆核销。
+          </Typography.Paragraph>
+        ) : null}
 
         {beanState.stockNotice ? (
           <Typography.Paragraph type="warning" style={{ marginBottom: 12 }}>
@@ -536,7 +640,7 @@ export default function MachineConfig() {
             loading={roastState.loading}
             columns={profileColumns}
             dataSource={filteredProfiles}
-            scroll={{ x: 1180 }}
+            scroll={{ x: 1480 }}
             pagination={{ pageSize: 6, showTotal: (total) => `共 ${total} 条烘焙记录` }}
           />
         )}
@@ -587,6 +691,21 @@ export default function MachineConfig() {
             ]}
           >
             <InputNumber min={50} max={3000} step={50} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="dailyCapacityG"
+            label="机台当天容量（克，留空表示不限量）"
+            tooltip="同机台、同烘焙日期的已排产且未作废锅次，载量合计超过该值时新批次自动排队"
+            rules={[
+              {
+                validator: (_rule, value: number | null) =>
+                  value === null || value === undefined || (Number.isFinite(value) && value > 0)
+                    ? Promise.resolve()
+                    : Promise.reject(new Error('当天容量需为正数，或留空表示不限量')),
+              },
+            ]}
+          >
+            <InputNumber min={1} step={100} style={{ width: '100%' }} placeholder="不限量" addonAfter="g / 天" />
           </Form.Item>
           <Form.Item name="note" label="备注" rules={[{ max: 40, message: '不超过 40 个字符' }]}>
             <Input placeholder="如：满锅载量 / 样品烘焙" />

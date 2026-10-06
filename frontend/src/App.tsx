@@ -12,6 +12,7 @@ import {
   ExperimentOutlined,
   InboxOutlined,
   SlidersOutlined,
+  UnorderedListOutlined,
 } from '@ant-design/icons';
 // 从 ./router/routes 叶子模块取常量（不可从 './router' 取，否则与 router/index.tsx 形成循环依赖）
 import { ROUTE_META, ROUTES } from './router/routes';
@@ -20,12 +21,14 @@ import { selectBeanStats } from './stores/beanSlice';
 import { selectRoastStats } from './stores/roastSlice';
 import { selectCuppingStats } from './stores/cuppingSlice';
 import { selectBlendStats } from './stores/blendSlice';
+import { selectPotStats } from './stores/potSlice';
 
 const { Header, Sider, Content, Footer } = Layout;
 
 const ROUTE_ICONS: Record<string, ReactNode> = {
   [ROUTES.beans]: <InboxOutlined />,
   [ROUTES.machines]: <SlidersOutlined />,
+  [ROUTES.pots]: <UnorderedListOutlined />,
   [ROUTES.curves]: <AreaChartOutlined />,
   [ROUTES.development]: <ApiOutlined />,
   [ROUTES.cuppings]: <ExperimentOutlined />,
@@ -43,6 +46,7 @@ export default function App() {
   const roastStats = useAppSelector(selectRoastStats);
   const cuppingStats = useAppSelector(selectCuppingStats);
   const blendStats = useAppSelector(selectBlendStats);
+  const potStats = useAppSelector(selectPotStats);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,6 +114,9 @@ export default function App() {
             <span>
               <CoffeeOutlined /> 拼配 {blendStats.total} 个 · 定版 {blendStats.finalized}
             </span>
+            <span>
+              <UnorderedListOutlined /> 锅次 {potStats.total} 锅 · 待核销 {potStats.pending}
+            </span>
           </Space>
         </div>
       </Sider>
@@ -158,7 +165,7 @@ export default function App() {
         </Content>
 
         <Footer style={{ textAlign: 'center', background: 'transparent', color: 'rgba(74,44,23,0.55)' }}>
-          纯前端 SPA · 数据仅保存在本机浏览器 IndexedDB（库名 gbroastlog，结构版本 2）·
+          纯前端 SPA · 数据仅保存在本机浏览器 IndexedDB（库名 gbroastlog，结构版本 3）·
           <Link to={ROUTES.beans} style={{ marginLeft: 6 }}>
             返回生豆档案
           </Link>
